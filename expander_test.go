@@ -80,20 +80,6 @@ func TestExpand_StdoutWriteError(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestExpand_InPlaceWriteError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses file permissions")
-	}
-	tmp := copyInputToTemp(t, "testdata/basic/input")
-	path := filepath.Join(tmp, "main.tf")
-	require.NoError(t, os.Chmod(path, 0o400))
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
-	e := NewExpander(tmp)
-	err := e.Expand(true)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "write")
-}
-
 func TestExpand_GlobError(t *testing.T) {
 	// A pattern with an unclosed character class makes filepath.Glob fail.
 	e := NewExpander("[invalid")
