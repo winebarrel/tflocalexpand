@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/winebarrel/tflocalexpand/actions/workflows/ci.yml/badge.svg)](https://github.com/winebarrel/tflocalexpand/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/winebarrel/tflocalexpand/branch/main/graph/badge.svg)](https://codecov.io/gh/winebarrel/tflocalexpand)
+[![AI Generated](https://img.shields.io/badge/AI%20Generated-Claude-orange?logo=anthropic)](https://claude.ai/claude-code)
 
 `tflocalexpand` inlines `local.<name>` references in Terraform `.tf` files with the expression from the corresponding `locals { ... }` block. The `locals` blocks themselves are left untouched — only the reference sites are substituted.
 
