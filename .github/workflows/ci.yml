@@ -20,3 +20,10 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v9
       - run: make test
+        env:
+          TEST_FLAGS: -coverprofile=coverage.out -covermode=atomic
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          fail_ci_if_error: true
