@@ -144,7 +144,7 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 		}
 		body := f.Bytes()
 		if !inPlace {
-			if _, err := fmt.Fprintf(e.Out, "=== %s ===\n%s", path, body); err != nil {
+			if _, err := fmt.Fprintf(e.Out, "### %s ###\n%s", path, body); err != nil {
 				return err
 			}
 			continue
