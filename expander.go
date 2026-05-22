@@ -427,9 +427,10 @@ func needsParens(t hclwrite.Tokens) bool {
 func groupBalanced(t hclwrite.Tokens, opener, closer hclsyntax.TokenType) bool {
 	depth := 0
 	for i, tok := range t {
-		if tok.Type == opener {
+		switch tok.Type {
+		case opener:
 			depth++
-		} else if tok.Type == closer {
+		case closer:
 			depth--
 			if depth == 0 {
 				return i == len(t)-1
