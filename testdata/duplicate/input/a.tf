@@ -1,0 +1,3 @@
+locals {
+  shared = 1
+}

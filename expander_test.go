@@ -1,20 +1,34 @@
 package tflocalexpand
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestExpand_Golden(t *testing.T) {
-	cases := []string{"basic", "chained", "interp", "nested", "unresolved"}
+	cases := []string{
+		"basic",
+		"chained",
+		"interp",
+		"literal-interp",
+		"nested",
+		"no-refs",
+		"undefined-ref",
+		"unresolved",
+	}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			tmp := copyInputToTemp(t, filepath.Join("testdata", name, "input"))
 			e := NewExpander(tmp)
+			e.Verbose = true
 			require.NoError(t, e.Expand(true))
 			compareDir(t, tmp, filepath.Join("testdata", name, "expected"))
 		})
@@ -28,6 +42,203 @@ func TestExpand_Cycle(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "circular")
 }
+
+func TestExpand_ParseError(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/parse-error/input")
+	e := NewExpander(tmp)
+	err := e.Expand(true)
+	require.Error(t, err)
+}
+
+func TestExpand_DuplicateLocal(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/duplicate/input")
+	e := NewExpander(tmp)
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate local")
+}
+
+func TestExpand_StdoutMode(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	var buf bytes.Buffer
+	e := NewExpander(tmp)
+	e.Out = &buf
+	require.NoError(t, e.Expand(false))
+	assert.Contains(t, buf.String(), `region = "us-east-1"`)
+	got, err := os.ReadFile(filepath.Join(tmp, "main.tf"))
+	require.NoError(t, err)
+	want, err := os.ReadFile("testdata/basic/input/main.tf")
+	require.NoError(t, err)
+	assert.Equal(t, string(want), string(got), "file must not be modified in stdout mode")
+}
+
+func TestExpand_StdoutWriteError(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	e := NewExpander(tmp)
+	e.Out = failingWriter{}
+	err := e.Expand(false)
+	require.Error(t, err)
+}
+
+func TestExpand_GlobError(t *testing.T) {
+	// A pattern with an unclosed character class makes filepath.Glob fail.
+	e := NewExpander("[invalid")
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "glob")
+}
+
+func TestExpand_LoadReadError(t *testing.T) {
+	tmp := t.TempDir()
+	// A directory named "trap.tf" makes os.ReadFile fail when load() iterates it.
+	require.NoError(t, os.Mkdir(filepath.Join(tmp, "trap.tf"), 0o755))
+	e := NewExpander(tmp)
+	err := e.Expand(true)
+	require.Error(t, err)
+}
+
+// ----------------- unit tests for internal helpers -----------------
+
+func TestIsLocalRefStart_PrecededByDot(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("foo")},
+		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("local")},
+		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
+	}
+	assert.False(t, isLocalRefStart(toks, 2))
+}
+
+func TestIsLocalRefStart_NonDotMiddle(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("local")},
+		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
+	}
+	assert.False(t, isLocalRefStart(toks, 0))
+}
+
+func TestIsLocalRefStart_NonIdentEnd(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("local")},
+		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
+		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
+	}
+	assert.False(t, isLocalRefStart(toks, 0))
+}
+
+func TestNeedsParens_Cases(t *testing.T) {
+	assert.False(t, needsParens(nil), "empty tokens => no parens")
+
+	single := hclwrite.Tokens{{Type: hclsyntax.TokenStar, Bytes: []byte("*")}}
+	assert.True(t, needsParens(single), "single non-primitive token => parens")
+
+	singleIdent := hclwrite.Tokens{{Type: hclsyntax.TokenIdent, Bytes: []byte("x")}}
+	assert.False(t, needsParens(singleIdent))
+
+	// `(a)b` is wrapped but inner closes before the end → still needs parens
+	notBalanced := hclwrite.Tokens{
+		{Type: hclsyntax.TokenOParen, Bytes: []byte("(")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("a")},
+		{Type: hclsyntax.TokenCParen, Bytes: []byte(")")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("b")},
+	}
+	assert.True(t, needsParens(notBalanced))
+}
+
+func TestGroupBalanced_NoOpener(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("a")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("b")},
+	}
+	assert.False(t, groupBalanced(toks, hclsyntax.TokenOParen, hclsyntax.TokenCParen))
+}
+
+func TestMatchTemplateSeqEnd_Nested(t *testing.T) {
+	// ${ ${x} } : nested TemplateInterp drives depth++.
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenTemplateInterp, Bytes: []byte("${")},
+		{Type: hclsyntax.TokenTemplateInterp, Bytes: []byte("${")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
+		{Type: hclsyntax.TokenTemplateSeqEnd, Bytes: []byte("}")},
+		{Type: hclsyntax.TokenTemplateSeqEnd, Bytes: []byte("}")},
+	}
+	assert.Equal(t, 4, matchTemplateSeqEnd(toks, 0))
+}
+
+func TestMatchTemplateSeqEnd_Unclosed(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenTemplateInterp, Bytes: []byte("${")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
+	}
+	assert.Equal(t, -1, matchTemplateSeqEnd(toks, 0))
+}
+
+func TestFlattenStringTemplates_Unbalanced(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenTemplateInterp, Bytes: []byte("${")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
+	}
+	got := flattenStringTemplates(toks)
+	assert.Equal(t, toks, got)
+}
+
+func TestFlattenStringTemplates_NonFlattenableInner(t *testing.T) {
+	// `${x + y}`: inner is neither a single literal nor a wrapped string template.
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenTemplateInterp, Bytes: []byte("${")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
+		{Type: hclsyntax.TokenPlus, Bytes: []byte("+")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("y")},
+		{Type: hclsyntax.TokenTemplateSeqEnd, Bytes: []byte("}")},
+	}
+	got := flattenStringTemplates(toks)
+	assert.Equal(t, toks, got)
+}
+
+func TestLiteralToQuotedLit_Number(t *testing.T) {
+	tok, ok := literalToQuotedLit(hclwrite.Tokens{
+		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("42")},
+	})
+	require.True(t, ok)
+	assert.Equal(t, hclsyntax.TokenQuotedLit, tok.Type)
+	assert.Equal(t, "42", string(tok.Bytes))
+}
+
+func TestLiteralToQuotedLit_Bools(t *testing.T) {
+	for _, lit := range []string{"true", "false"} {
+		tok, ok := literalToQuotedLit(hclwrite.Tokens{
+			{Type: hclsyntax.TokenIdent, Bytes: []byte(lit)},
+		})
+		require.True(t, ok, lit)
+		assert.Equal(t, lit, string(tok.Bytes))
+	}
+}
+
+func TestLiteralToQuotedLit_NonMatching(t *testing.T) {
+	_, ok := literalToQuotedLit(hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("a")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("b")},
+	})
+	assert.False(t, ok)
+
+	_, ok = literalToQuotedLit(hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("nope")},
+	})
+	assert.False(t, ok)
+
+	_, ok = literalToQuotedLit(hclwrite.Tokens{
+		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
+	})
+	assert.False(t, ok)
+}
+
+// ----------------- test helpers -----------------
+
+type failingWriter struct{}
+
+func (failingWriter) Write(_ []byte) (int, error) { return 0, errors.New("boom") }
 
 func copyInputToTemp(t *testing.T, srcDir string) string {
 	t.Helper()
