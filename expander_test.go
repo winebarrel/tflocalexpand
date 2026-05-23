@@ -18,6 +18,7 @@ func TestExpand_Golden(t *testing.T) {
 	cases := []struct {
 		name  string
 		prune bool
+		eval  bool
 	}{
 		{name: "basic"},
 		{name: "chained"},
@@ -29,6 +30,7 @@ func TestExpand_Golden(t *testing.T) {
 		{name: "unresolved"},
 		{name: "prune", prune: true},
 		{name: "prune-partial", prune: true},
+		{name: "eval", eval: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,6 +38,7 @@ func TestExpand_Golden(t *testing.T) {
 			e := NewExpander(tmp)
 			e.Verbose = true
 			e.Prune = tc.prune
+			e.Eval = tc.eval
 			require.NoError(t, e.Expand(true))
 			compareDir(t, tmp, filepath.Join("testdata", tc.name, "expected"))
 		})
@@ -238,6 +241,41 @@ func TestLiteralToQuotedLit_NonMatching(t *testing.T) {
 	_, ok = literalToQuotedLit(hclwrite.Tokens{
 		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
 	})
+	assert.False(t, ok)
+}
+
+func TestAccessChainExtent_NestedBrackets(t *testing.T) {
+	// Tokens for `[[0,1][0]]` — exercise the nested-bracket depth++ path.
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
+		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
+		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("0")},
+		{Type: hclsyntax.TokenComma, Bytes: []byte(",")},
+		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("1")},
+		{Type: hclsyntax.TokenCBrack, Bytes: []byte("]")},
+		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
+		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("0")},
+		{Type: hclsyntax.TokenCBrack, Bytes: []byte("]")},
+		{Type: hclsyntax.TokenCBrack, Bytes: []byte("]")},
+	}
+	assert.Equal(t, len(toks), accessChainExtent(toks, 0))
+}
+
+func TestAccessChainExtent_UnbalancedBreaks(t *testing.T) {
+	// `[ 0` with no closing bracket — should stop at the unclosed `[`.
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
+		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("0")},
+	}
+	assert.Equal(t, 0, accessChainExtent(toks, 0))
+}
+
+func TestTryFoldAccess_ParseFailure(t *testing.T) {
+	// Construct base/chain that produce unparseable source: a bare `)` in the
+	// chain breaks the surrounding parens.
+	base := hclwrite.Tokens{{Type: hclsyntax.TokenNumberLit, Bytes: []byte("1")}}
+	chain := hclwrite.Tokens{{Type: hclsyntax.TokenCParen, Bytes: []byte(")")}}
+	_, ok := tryFoldAccess(base, chain)
 	assert.False(t, ok)
 }
 
