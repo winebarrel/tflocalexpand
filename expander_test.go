@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/stretchr/testify/assert"
@@ -238,6 +239,44 @@ func TestLiteralToQuotedLit_NonMatching(t *testing.T) {
 		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
 	})
 	assert.False(t, ok)
+}
+
+func TestRemoveUnusedLocalsFromBody_KeepsReferenced(t *testing.T) {
+	src := []byte(`locals {
+  keep = "k"
+  drop = "d"
+}
+`)
+	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+
+	used := map[string]bool{"keep": true}
+	changed := removeUnusedLocalsFromBody(f.Body(), used, false)
+	assert.True(t, changed)
+
+	assert.Equal(t, `locals {
+  keep = "k"
+}
+`, string(f.Bytes()))
+}
+
+func TestRemoveUnusedLocalsFromBody_RecursesIntoNonLocalsBlocks(t *testing.T) {
+	// A `locals` block nested inside another block is unusual for Terraform
+	// but the HCL parser accepts it; the prune pass should still reach it.
+	src := []byte(`module "m" {
+  locals {
+    drop = "d"
+  }
+}
+`)
+	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+
+	changed := removeUnusedLocalsFromBody(f.Body(), map[string]bool{}, false)
+	assert.True(t, changed)
+	assert.Equal(t, `module "m" {
+}
+`, string(f.Bytes()))
 }
 
 // ----------------- test helpers -----------------
