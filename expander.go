@@ -1,6 +1,7 @@
 package tflocalexpand
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,7 @@ type Expander struct {
 	Out     io.Writer
 	Verbose bool
 	Prune   bool
+	Eval    bool
 
 	files     map[string]*hclwrite.File
 	localsRaw map[string]hclwrite.Tokens
@@ -115,7 +117,7 @@ func (e *Expander) resolveLocals() error {
 				return err
 			}
 		}
-		e.resolved[name] = replaceLocalRefs(raw, e.resolved, e.Verbose)
+		e.resolved[name] = replaceLocalRefs(raw, e.resolved, e.Verbose, e.Eval)
 		return nil
 	}
 	names := make([]string, 0, len(e.localsRaw))
@@ -141,7 +143,7 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 	changedFiles := map[string]bool{}
 	for _, path := range paths {
 		f := e.files[path]
-		if rewriteBody(f.Body(), e.resolved, e.Verbose, e.Prune) {
+		if rewriteBody(f.Body(), e.resolved, e.Verbose, e.Prune, e.Eval) {
 			changedFiles[path] = true
 		}
 	}
@@ -172,11 +174,11 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 	return nil
 }
 
-func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose bool, includeLocals bool) bool {
+func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose, includeLocals, eval bool) bool {
 	changed := false
 	for name, attr := range body.Attributes() {
 		orig := attr.Expr().BuildTokens(nil)
-		repl := replaceLocalRefs(orig, locals, verbose)
+		repl := replaceLocalRefs(orig, locals, verbose, eval)
 		if !tokensEqual(orig, repl) {
 			body.SetAttributeRaw(name, repl)
 			changed = true
@@ -186,7 +188,7 @@ func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose
 		if blk.Type() == "locals" && !includeLocals {
 			continue
 		}
-		if rewriteBody(blk.Body(), locals, verbose, includeLocals) {
+		if rewriteBody(blk.Body(), locals, verbose, includeLocals, eval) {
 			changed = true
 		}
 	}
@@ -298,8 +300,11 @@ func isLocalRefStart(tokens hclwrite.Tokens, i int) bool {
 }
 
 // replaceLocalRefs returns a new token slice with `local.X` references
-// replaced by the resolved tokens, parenthesized when needed.
-func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, verbose bool) hclwrite.Tokens {
+// replaced by the resolved tokens, parenthesized when needed. When eval is
+// true and a substituted local is followed by a chain of `.attr` / `[idx]`
+// accessors that can be fully evaluated in an empty context, the entire chain
+// is folded to a literal.
+func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, verbose, eval bool) hclwrite.Tokens {
 	in = cloneTokens(in)
 	out := make(hclwrite.Tokens, 0, len(in))
 	i := 0
@@ -312,12 +317,32 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 				i += 3
 				continue
 			}
+			leadSpaces := in[i].SpacesBefore
 			replCopy := cloneTokens(repl)
 			if needsParens(replCopy) {
 				replCopy = wrapParens(replCopy)
 			}
+
+			chainEnd := i + 3
+			if eval {
+				chainEnd = accessChainExtent(in, i+3)
+			}
+			if eval && chainEnd > i+3 {
+				if folded, ok := tryFoldAccess(replCopy, in[i+3:chainEnd]); ok {
+					if len(folded) > 0 {
+						folded[0].SpacesBefore = leadSpaces
+					}
+					if verbose {
+						log.Printf("  - expanding local.%s (folded)", name)
+					}
+					out = append(out, folded...)
+					i = chainEnd
+					continue
+				}
+			}
+
 			if len(replCopy) > 0 {
-				replCopy[0].SpacesBefore = in[i].SpacesBefore
+				replCopy[0].SpacesBefore = leadSpaces
 			}
 			if verbose {
 				log.Printf("  - expanding local.%s", name)
@@ -330,6 +355,61 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 		i++
 	}
 	return mergeQuotedLits(flattenStringTemplates(out))
+}
+
+// accessChainExtent returns the end index (exclusive) of the chain of
+// `.<ident>` and `[...]` accessors starting at `start`. Returns `start` if
+// no chain is present.
+func accessChainExtent(in hclwrite.Tokens, start int) int {
+	i := start
+	for i < len(in) {
+		if i+1 < len(in) && in[i].Type == hclsyntax.TokenDot && in[i+1].Type == hclsyntax.TokenIdent {
+			i += 2
+			continue
+		}
+		if in[i].Type == hclsyntax.TokenOBrack {
+			depth := 1
+			j := i + 1
+			for j < len(in) && depth > 0 {
+				switch in[j].Type {
+				case hclsyntax.TokenOBrack:
+					depth++
+				case hclsyntax.TokenCBrack:
+					depth--
+				}
+				j++
+			}
+			if depth != 0 {
+				break
+			}
+			i = j
+			continue
+		}
+		break
+	}
+	return i
+}
+
+// tryFoldAccess builds `(<base>)<chain>` as source, parses it as an HCL
+// expression, evaluates it with a nil context (constants only — no variables
+// or functions permitted), and returns the resulting value's literal tokens.
+// Returns (nil, false) if parsing fails, evaluation fails, or the result
+// contains unknown values.
+func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
+	var buf bytes.Buffer
+	buf.WriteByte('(')
+	buf.Write(base.Bytes())
+	buf.WriteByte(')')
+	buf.Write(chain.Bytes())
+	expr, diags := hclsyntax.ParseExpression(buf.Bytes(), "", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		return nil, false
+	}
+	val, diags := expr.Value(nil)
+	if diags.HasErrors() || !val.IsWhollyKnown() {
+		return nil, false
+	}
+	return hclwrite.TokensForValue(val), true
 }
 
 // flattenStringTemplates rewrites `${"..."}` sequences to inline their content,

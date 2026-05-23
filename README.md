@@ -26,6 +26,7 @@ Flags:
   -h, --help        Show help.
   -i, --in-place    Write changes back to files instead of stdout.
   -p, --prune       Expand inside locals blocks and remove local definitions with no remaining references.
+  -e, --eval        Fold direct attribute/index accesses on a substituted local (e.g. local.obj.foo) to a literal when fully evaluatable.
   -v, --verbose     Verbose logging.
       --version
 ```
@@ -79,6 +80,40 @@ Notes:
 - `${...}` interpolation collapses when the inner value is a string, number, or boolean literal (`"${local.prefix}-server"` → `"app-server"`).
 - References to undefined locals are left as-is.
 - Circular references are reported as errors.
+
+## Folding direct accesses
+
+With `-e` / `--eval`, when a `local.<name>` reference is immediately followed by a chain of `.attr` / `[idx]` accessors, the substituted value plus the chain is evaluated as a constant expression. If it yields a concrete value, the whole reference collapses to a literal. Anything that needs a runtime context (`var.X`, function calls, etc.) falls back to the plain token substitution.
+
+```hcl
+# main.tf
+locals {
+  obj = { foo = 100, bar = "x" }
+  arr = [1, 2, 3]
+}
+resource "r" "a" {
+  attr      = local.obj.foo
+  index     = local.arr[0]
+  fallback  = local.obj.foo + var.something
+}
+```
+
+```sh
+tflocalexpand -i -e .
+```
+
+```hcl
+# main.tf (rewritten)
+locals {
+  obj = { foo = 100, bar = "x" }
+  arr = [1, 2, 3]
+}
+resource "r" "a" {
+  attr      = 100
+  index     = 1
+  fallback  = 100 + var.something
+}
+```
 
 ## Pruning unused locals
 
