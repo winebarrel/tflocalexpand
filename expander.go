@@ -391,9 +391,10 @@ func accessChainExtent(in hclwrite.Tokens, start int) int {
 }
 
 // tryFoldAccess builds `(<base>)<chain>` as source, parses it as an HCL
-// expression, evaluates it in an empty context, and returns the resulting
-// value's literal tokens. Returns (nil, false) if parsing fails, evaluation
-// fails, or the result contains unknown values.
+// expression, evaluates it with a nil context (constants only — no variables
+// or functions permitted), and returns the resulting value's literal tokens.
+// Returns (nil, false) if parsing fails, evaluation fails, or the result
+// contains unknown values.
 func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
 	var buf bytes.Buffer
 	buf.WriteByte('(')
