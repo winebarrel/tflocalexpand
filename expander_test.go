@@ -14,23 +14,29 @@ import (
 )
 
 func TestExpand_Golden(t *testing.T) {
-	cases := []string{
-		"basic",
-		"chained",
-		"interp",
-		"literal-interp",
-		"nested",
-		"no-refs",
-		"undefined-ref",
-		"unresolved",
+	cases := []struct {
+		name  string
+		prune bool
+	}{
+		{name: "basic"},
+		{name: "chained"},
+		{name: "interp"},
+		{name: "literal-interp"},
+		{name: "nested"},
+		{name: "no-refs"},
+		{name: "undefined-ref"},
+		{name: "unresolved"},
+		{name: "prune", prune: true},
+		{name: "prune-partial", prune: true},
 	}
-	for _, name := range cases {
-		t.Run(name, func(t *testing.T) {
-			tmp := copyInputToTemp(t, filepath.Join("testdata", name, "input"))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := copyInputToTemp(t, filepath.Join("testdata", tc.name, "input"))
 			e := NewExpander(tmp)
 			e.Verbose = true
+			e.Prune = tc.prune
 			require.NoError(t, e.Expand(true))
-			compareDir(t, tmp, filepath.Join("testdata", name, "expected"))
+			compareDir(t, tmp, filepath.Join("testdata", tc.name, "expected"))
 		})
 	}
 }

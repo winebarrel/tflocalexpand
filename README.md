@@ -25,11 +25,14 @@ Arguments:
 Flags:
   -h, --help        Show help.
   -i, --in-place    Write changes back to files instead of stdout.
+  -p, --prune       Expand inside locals blocks and remove local definitions with no remaining references.
   -v, --verbose     Verbose logging.
       --version
 ```
 
 By default the result is printed to stdout. Pass `-i` / `--in-place` to rewrite the files on disk.
+
+Pass `-p` / `--prune` to also expand `local.<name>` references *inside* `locals` blocks and then delete any local definition that no longer has a reference anywhere. Locals whose references could not be fully expanded (e.g., pointing at an undefined name) are kept.
 
 ## Example
 
@@ -76,3 +79,33 @@ Notes:
 - `${...}` interpolation collapses when the inner value is a string, number, or boolean literal (`"${local.prefix}-server"` → `"app-server"`).
 - References to undefined locals are left as-is.
 - Circular references are reported as errors.
+
+## Pruning unused locals
+
+With `-p` / `--prune`, references inside `locals` blocks are expanded too, and any local whose `local.<name>` is no longer referenced anywhere is removed. Empty `locals` blocks are dropped.
+
+```hcl
+# main.tf
+locals {
+  a = "aaa"
+  b = "bbb"
+  c = "ccc"
+}
+locals {
+  x = "${local.a}x${local.b}x${local.c}"
+}
+resource "foo" "bar" {
+  name = local.x
+}
+```
+
+```sh
+tflocalexpand -i -p .
+```
+
+```hcl
+# main.tf (rewritten)
+resource "foo" "bar" {
+  name = "aaaxbbbxccc"
+}
+```
