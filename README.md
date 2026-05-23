@@ -83,7 +83,7 @@ Notes:
 
 ## Folding direct accesses
 
-With `-e` / `--eval`, when a `local.<name>` reference is immediately followed by a chain of `.attr` / `[idx]` accessors, the substituted value plus the chain is evaluated in an empty context. If the result is a concrete value, the whole expression collapses to a literal. Expressions that can't be fully evaluated (function calls, references to `var.X`, etc.) fall back to the plain token substitution.
+With `-e` / `--eval`, when a `local.<name>` reference is immediately followed by a chain of `.attr` / `[idx]` accessors, the substituted value plus the chain is evaluated as a constant expression. If it yields a concrete value, the whole reference collapses to a literal. Anything that needs a runtime context (`var.X`, function calls, etc.) falls back to the plain token substitution.
 
 ```hcl
 # main.tf
