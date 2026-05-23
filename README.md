@@ -9,7 +9,7 @@
 ## Installation
 
 ```
-go install github.com/winebarrel/tflocalexpand/cmd/tflocalexpand@latest
+brew install winebarrel/tflocalexpand/tflocalexpand
 ```
 
 ## Usage

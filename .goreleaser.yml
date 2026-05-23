@@ -10,3 +10,16 @@ builds:
       - CGO_ENABLED=0
 checksum:
   name_template: "checksums.txt"
+homebrew_casks:
+  - repository:
+      owner: winebarrel
+      name: homebrew-tflocalexpand
+    homepage: https://github.com/winebarrel/tflocalexpand
+    description: tflocalexpand is a tool to expand Terraform locals references into their underlying expressions.
+    license: MIT
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tflocalexpand"]
+          end
