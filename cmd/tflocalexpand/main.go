@@ -17,6 +17,7 @@ func init() {
 type options struct {
 	Dir     string `arg:"" optional:"" default:"." help:"Directory containing *.tf files (default: \".\")."`
 	InPlace bool   `short:"i" help:"Write changes back to files instead of stdout."`
+	Prune   bool   `short:"p" help:"Expand inside locals blocks and remove local definitions with no remaining references."`
 	Verbose bool   `short:"v" help:"Verbose logging."`
 	Version kong.VersionFlag
 }
@@ -39,6 +40,7 @@ func main() {
 	opts := parseArgs()
 	e := tflocalexpand.NewExpander(opts.Dir)
 	e.Verbose = opts.Verbose
+	e.Prune = opts.Prune
 	if err := e.Expand(opts.InPlace); err != nil {
 		log.Fatalf("error: %v", err)
 	}

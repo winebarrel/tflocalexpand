@@ -17,6 +17,7 @@ type Expander struct {
 	Dir     string
 	Out     io.Writer
 	Verbose bool
+	Prune   bool
 
 	files     map[string]*hclwrite.File
 	localsRaw map[string]hclwrite.Tokens
@@ -136,12 +137,24 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+
+	changedFiles := map[string]bool{}
 	for _, path := range paths {
 		f := e.files[path]
-		changed := rewriteBody(f.Body(), e.resolved, e.Verbose)
-		if !changed {
+		if rewriteBody(f.Body(), e.resolved, e.Verbose, e.Prune) {
+			changedFiles[path] = true
+		}
+	}
+
+	if e.Prune {
+		e.pruneUnusedLocals(changedFiles)
+	}
+
+	for _, path := range paths {
+		if !changedFiles[path] {
 			continue
 		}
+		f := e.files[path]
 		body := f.Bytes()
 		if !inPlace {
 			if _, err := fmt.Fprintf(e.Out, "### %s ###\n%s", path, body); err != nil {
@@ -159,7 +172,7 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 	return nil
 }
 
-func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose bool) bool {
+func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose bool, includeLocals bool) bool {
 	changed := false
 	for name, attr := range body.Attributes() {
 		orig := attr.Expr().BuildTokens(nil)
@@ -170,10 +183,62 @@ func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose
 		}
 	}
 	for _, blk := range body.Blocks() {
-		if blk.Type() == "locals" {
+		if blk.Type() == "locals" && !includeLocals {
 			continue
 		}
-		if rewriteBody(blk.Body(), locals, verbose) {
+		if rewriteBody(blk.Body(), locals, verbose, includeLocals) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// pruneUnusedLocals removes local definitions whose `local.<name>` is no
+// longer referenced anywhere after expansion, and drops empty `locals` blocks.
+func (e *Expander) pruneUnusedLocals(changedFiles map[string]bool) {
+	used := map[string]bool{}
+	for _, f := range e.files {
+		collectAllLocalRefs(f.Body(), used)
+	}
+	for path, f := range e.files {
+		if removeUnusedLocalsFromBody(f.Body(), used, e.Verbose) {
+			changedFiles[path] = true
+		}
+	}
+}
+
+func collectAllLocalRefs(body *hclwrite.Body, used map[string]bool) {
+	for _, attr := range body.Attributes() {
+		for _, name := range collectLocalRefs(attr.Expr().BuildTokens(nil)) {
+			used[name] = true
+		}
+	}
+	for _, blk := range body.Blocks() {
+		collectAllLocalRefs(blk.Body(), used)
+	}
+}
+
+func removeUnusedLocalsFromBody(body *hclwrite.Body, used map[string]bool, verbose bool) bool {
+	changed := false
+	for _, blk := range body.Blocks() {
+		if blk.Type() != "locals" {
+			if removeUnusedLocalsFromBody(blk.Body(), used, verbose) {
+				changed = true
+			}
+			continue
+		}
+		for name := range blk.Body().Attributes() {
+			if used[name] {
+				continue
+			}
+			blk.Body().RemoveAttribute(name)
+			if verbose {
+				log.Printf("  - pruning unused local.%s", name)
+			}
+			changed = true
+		}
+		if len(blk.Body().Attributes()) == 0 && len(blk.Body().Blocks()) == 0 {
+			body.RemoveBlock(blk)
 			changed = true
 		}
 	}

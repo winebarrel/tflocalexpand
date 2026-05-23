@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/stretchr/testify/assert"
@@ -14,23 +15,29 @@ import (
 )
 
 func TestExpand_Golden(t *testing.T) {
-	cases := []string{
-		"basic",
-		"chained",
-		"interp",
-		"literal-interp",
-		"nested",
-		"no-refs",
-		"undefined-ref",
-		"unresolved",
+	cases := []struct {
+		name  string
+		prune bool
+	}{
+		{name: "basic"},
+		{name: "chained"},
+		{name: "interp"},
+		{name: "literal-interp"},
+		{name: "nested"},
+		{name: "no-refs"},
+		{name: "undefined-ref"},
+		{name: "unresolved"},
+		{name: "prune", prune: true},
+		{name: "prune-partial", prune: true},
 	}
-	for _, name := range cases {
-		t.Run(name, func(t *testing.T) {
-			tmp := copyInputToTemp(t, filepath.Join("testdata", name, "input"))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := copyInputToTemp(t, filepath.Join("testdata", tc.name, "input"))
 			e := NewExpander(tmp)
 			e.Verbose = true
+			e.Prune = tc.prune
 			require.NoError(t, e.Expand(true))
-			compareDir(t, tmp, filepath.Join("testdata", name, "expected"))
+			compareDir(t, tmp, filepath.Join("testdata", tc.name, "expected"))
 		})
 	}
 }
@@ -232,6 +239,44 @@ func TestLiteralToQuotedLit_NonMatching(t *testing.T) {
 		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
 	})
 	assert.False(t, ok)
+}
+
+func TestRemoveUnusedLocalsFromBody_KeepsReferenced(t *testing.T) {
+	src := []byte(`locals {
+  keep = "k"
+  drop = "d"
+}
+`)
+	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+
+	used := map[string]bool{"keep": true}
+	changed := removeUnusedLocalsFromBody(f.Body(), used, false)
+	assert.True(t, changed)
+
+	assert.Equal(t, `locals {
+  keep = "k"
+}
+`, string(f.Bytes()))
+}
+
+func TestRemoveUnusedLocalsFromBody_RecursesIntoNonLocalsBlocks(t *testing.T) {
+	// A `locals` block nested inside another block is unusual for Terraform
+	// but the HCL parser accepts it; the prune pass should still reach it.
+	src := []byte(`module "m" {
+  locals {
+    drop = "d"
+  }
+}
+`)
+	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+
+	changed := removeUnusedLocalsFromBody(f.Body(), map[string]bool{}, false)
+	assert.True(t, changed)
+	assert.Equal(t, `module "m" {
+}
+`, string(f.Bytes()))
 }
 
 // ----------------- test helpers -----------------
