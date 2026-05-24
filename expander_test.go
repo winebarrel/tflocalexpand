@@ -32,6 +32,7 @@ func TestExpand_Golden(t *testing.T) {
 		{name: "prune-partial", prune: true},
 		{name: "eval", eval: true},
 		{name: "eval-ternary", eval: true},
+		{name: "eval-binop", eval: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -271,14 +272,14 @@ func TestAccessChainExtent_UnbalancedBreaks(t *testing.T) {
 	assert.Equal(t, 0, accessChainExtent(toks, 0))
 }
 
-func TestFoldStaticConditionals_Empty(t *testing.T) {
-	assert.Nil(t, foldStaticConditionals(nil, false))
+func TestFoldStaticExprs_Empty(t *testing.T) {
+	assert.Nil(t, foldStaticExprs(nil, false))
 }
 
-func TestFoldOneConditional_ParseFailure(t *testing.T) {
+func TestFoldOneExpr_ParseFailure(t *testing.T) {
 	// `?` alone is not a valid expression — parse fails, no fold.
 	src := []byte("?")
-	out, ok := foldOneConditional(src)
+	out, ok := foldOneExpr(src)
 	assert.False(t, ok)
 	assert.Equal(t, src, out)
 }

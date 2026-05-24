@@ -357,10 +357,10 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 	}
 	out = mergeQuotedLits(flattenStringTemplates(out))
 	if eval {
-		out = foldStaticConditionals(out, verbose)
-		// Folding a ternary inside a template (e.g. `${true ? "b" : "c"}`)
-		// can produce new `${"..."}` / adjacent QuotedLit sequences that the
-		// earlier flatten/merge pass didn't see.
+		out = foldStaticExprs(out, verbose)
+		// Folding inside a template (e.g. `${true ? "b" : "c"}` or
+		// `${100 > 0}`) can produce new `${"..."}` / adjacent QuotedLit
+		// sequences that the earlier flatten/merge pass didn't see.
 		out = mergeQuotedLits(flattenStringTemplates(out))
 	}
 	return out
@@ -421,26 +421,32 @@ func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
 	return hclwrite.TokensForValue(val), true
 }
 
-// foldStaticConditionals re-parses the given tokens as an HCL expression and
-// folds any ternary whose condition evaluates to a known boolean with a nil
-// context (i.e. depends only on constants). Non-foldable ternaries — including
-// those whose condition still references `var.X`, functions, or unresolved
-// `local.X` — are left untouched.
-func foldStaticConditionals(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
-	if len(in) == 0 || !hasQuestionToken(in) {
+// foldStaticExprs re-parses the given tokens as an HCL expression and folds:
+//   - ConditionalExpr whose condition evaluates to a known boolean (replaced by
+//     the chosen branch's source verbatim — the other branch may still
+//     reference unknowns).
+//   - BinaryOpExpr / UnaryOpExpr whose result evaluates to a known boolean
+//     (replaced by `true` / `false`). Comparison and logical operators are the
+//     practical match; arithmetic stays as-is because its result isn't bool.
+//
+// Loops until no more folds are possible. Non-foldable expressions — including
+// those still referencing `var.X`, functions, or unresolved `local.X` — are
+// left untouched.
+func foldStaticExprs(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
+	if len(in) == 0 || !hasFoldableToken(in) {
 		return in
 	}
 	src := in.Bytes()
 	changed := false
 	for {
-		next, didFold := foldOneConditional(src)
+		next, didFold := foldOneExpr(src)
 		if !didFold {
 			break
 		}
 		src = next
 		changed = true
 		if verbose {
-			log.Printf("  - folding static conditional")
+			log.Printf("  - folding static expression")
 		}
 	}
 	if !changed {
@@ -456,69 +462,100 @@ func foldStaticConditionals(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
 	return out
 }
 
-// hasQuestionToken reports whether the token slice contains a `?` token,
-// used as a cheap pre-check to skip the parse/walk work when no ternary is
-// present.
-func hasQuestionToken(in hclwrite.Tokens) bool {
+// hasFoldableToken reports whether the token slice contains any operator token
+// that could anchor a foldable expression (ternary `?`, comparison, logical
+// AND/OR, or unary `!`). Used as a cheap pre-check to skip the parse/walk work
+// when there is nothing to fold.
+func hasFoldableToken(in hclwrite.Tokens) bool {
 	for _, t := range in {
-		if t.Type == hclsyntax.TokenQuestion {
+		switch t.Type {
+		case hclsyntax.TokenQuestion,
+			hclsyntax.TokenEqualOp,
+			hclsyntax.TokenNotEqual,
+			hclsyntax.TokenLessThan,
+			hclsyntax.TokenLessThanEq,
+			hclsyntax.TokenGreaterThan,
+			hclsyntax.TokenGreaterThanEq,
+			hclsyntax.TokenAnd,
+			hclsyntax.TokenOr,
+			hclsyntax.TokenBang:
 			return true
 		}
 	}
 	return false
 }
 
-// foldOneConditional finds the first conditional whose condition is a known
-// boolean constant (DFS order) and replaces it with the selected branch's
-// source bytes. Returns the original src unchanged when none is found.
-func foldOneConditional(src []byte) ([]byte, bool) {
+// foldOneExpr finds the first foldable expression in DFS order and rewrites
+// its source range. Returns the original src unchanged when none is found.
+func foldOneExpr(src []byte) ([]byte, bool) {
 	expr, diags := hclsyntax.ParseExpression(src, "", hcl.Pos{Line: 1, Column: 1})
 	if diags.HasErrors() {
 		return src, false
 	}
-	finder := &condFinder{}
+	finder := &foldFinder{}
 	hclsyntax.Walk(expr, finder)
 	if finder.target == nil {
 		return src, false
 	}
 	tr := finder.target.Range()
-	cr := finder.chosen.Range()
-	out := make([]byte, 0, len(src))
+	var replacement []byte
+	if finder.chosen != nil {
+		cr := finder.chosen.Range()
+		replacement = src[cr.Start.Byte:cr.End.Byte]
+	} else {
+		replacement = hclwrite.TokensForValue(finder.value).Bytes()
+	}
+	out := make([]byte, 0, len(src)-(tr.End.Byte-tr.Start.Byte)+len(replacement))
 	out = append(out, src[:tr.Start.Byte]...)
-	out = append(out, src[cr.Start.Byte:cr.End.Byte]...)
+	out = append(out, replacement...)
 	out = append(out, src[tr.End.Byte:]...)
 	return out, true
 }
 
-// condFinder walks an HCL AST and captures the first ConditionalExpr whose
-// condition evaluates to a known bool with an empty eval context.
-type condFinder struct {
-	target *hclsyntax.ConditionalExpr
+// foldFinder walks an HCL AST and captures the first foldable expression.
+// For ConditionalExpr, `chosen` is the branch whose source is copied verbatim.
+// For BinaryOpExpr / UnaryOpExpr, `value` is the evaluated bool to emit.
+type foldFinder struct {
+	target hclsyntax.Expression
 	chosen hclsyntax.Expression
+	value  cty.Value
 }
 
-func (f *condFinder) Enter(n hclsyntax.Node) hcl.Diagnostics {
+func (f *foldFinder) Enter(n hclsyntax.Node) hcl.Diagnostics {
 	if f.target != nil {
 		return nil
 	}
-	c, ok := n.(*hclsyntax.ConditionalExpr)
-	if !ok {
-		return nil
-	}
-	v, d := c.Condition.Value(nil)
-	if d.HasErrors() || !v.IsWhollyKnown() || v.Type() != cty.Bool || v.IsNull() {
-		return nil
-	}
-	f.target = c
-	if v.True() {
-		f.chosen = c.TrueResult
-	} else {
-		f.chosen = c.FalseResult
+	switch e := n.(type) {
+	case *hclsyntax.ConditionalExpr:
+		v, d := e.Condition.Value(nil)
+		if d.HasErrors() || !v.IsWhollyKnown() || v.IsNull() || v.Type() != cty.Bool {
+			return nil
+		}
+		f.target = e
+		if v.True() {
+			f.chosen = e.TrueResult
+		} else {
+			f.chosen = e.FalseResult
+		}
+	case *hclsyntax.BinaryOpExpr:
+		v, d := e.Value(nil)
+		if d.HasErrors() || !v.IsWhollyKnown() || v.IsNull() || v.Type() != cty.Bool {
+			return nil
+		}
+		f.target = e
+		f.value = v
+	case *hclsyntax.UnaryOpExpr:
+		v, d := e.Value(nil)
+		if d.HasErrors() || !v.IsWhollyKnown() || v.IsNull() || v.Type() != cty.Bool {
+			return nil
+		}
+		f.target = e
+		f.value = v
 	}
 	return nil
 }
 
-func (f *condFinder) Exit(hclsyntax.Node) hcl.Diagnostics { return nil }
+func (f *foldFinder) Exit(hclsyntax.Node) hcl.Diagnostics { return nil }
 
 // tokensFromExprSource re-tokenizes an expression source by parsing it as a
 // trivial attribute and lifting its expression tokens. Returns (nil, false) if
