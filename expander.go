@@ -21,6 +21,8 @@ type Expander struct {
 	Verbose bool
 	Prune   bool
 	Eval    bool
+	Only    []string
+	Except  []string
 
 	files     map[string]*hclwrite.File
 	localsRaw map[string]hclwrite.Tokens
@@ -141,10 +143,11 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 	}
 	sort.Strings(paths)
 
+	resolved := e.filteredResolved()
 	changedFiles := map[string]bool{}
 	for _, path := range paths {
 		f := e.files[path]
-		if rewriteBody(f.Body(), e.resolved, e.Verbose, e.Prune, e.Eval) {
+		if rewriteBody(f.Body(), resolved, e.Verbose, e.Prune, e.Eval) {
 			changedFiles[path] = true
 		}
 	}
@@ -194,6 +197,40 @@ func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose
 		}
 	}
 	return changed
+}
+
+// filteredResolved returns the resolved-locals map narrowed by Only/Except.
+// Names absent from the returned map are left as `local.<name>` references by
+// `replaceLocalRefs`. Chain resolution in `resolveLocals` still uses the full
+// `e.resolved`, so expanded values are complete even when their dependencies
+// are themselves excluded from the user-facing rewrite.
+func (e *Expander) filteredResolved() map[string]hclwrite.Tokens {
+	if len(e.Only) == 0 && len(e.Except) == 0 {
+		return e.resolved
+	}
+	out := map[string]hclwrite.Tokens{}
+	if len(e.Only) > 0 {
+		allow := map[string]bool{}
+		for _, n := range e.Only {
+			allow[n] = true
+		}
+		for name, tokens := range e.resolved {
+			if allow[name] {
+				out[name] = tokens
+			}
+		}
+		return out
+	}
+	deny := map[string]bool{}
+	for _, n := range e.Except {
+		deny[n] = true
+	}
+	for name, tokens := range e.resolved {
+		if !deny[name] {
+			out[name] = tokens
+		}
+	}
+	return out
 }
 
 // pruneUnusedLocals removes local definitions whose `local.<name>` is no
