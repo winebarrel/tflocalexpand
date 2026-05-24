@@ -18,7 +18,7 @@ type options struct {
 	Dir     string `arg:"" optional:"" default:"." help:"Directory containing *.tf files (default: \".\")."`
 	InPlace bool   `short:"i" help:"Write changes back to files instead of stdout."`
 	Prune   bool   `short:"p" help:"Expand inside locals blocks and remove local definitions with no remaining references."`
-	Eval    bool   `short:"e" help:"Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition)."`
+	Eval    bool   `short:"e" help:"Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands)."`
 	Verbose bool   `short:"v" help:"Verbose logging."`
 	Version kong.VersionFlag
 }

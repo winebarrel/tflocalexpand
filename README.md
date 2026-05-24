@@ -26,7 +26,7 @@ Flags:
   -h, --help        Show help.
   -i, --in-place    Write changes back to files instead of stdout.
   -p, --prune       Expand inside locals blocks and remove local definitions with no remaining references.
-  -e, --eval        Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition).
+  -e, --eval        Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands).
   -v, --verbose     Verbose logging.
       --version
 ```
@@ -87,6 +87,7 @@ With `-e` / `--eval`, expressions that become statically evaluatable after subst
 
 - A `local.<name>` followed by a chain of `.attr` / `[idx]` accessors is evaluated against the substituted value (e.g. `local.obj.foo` → `100`).
 - A ternary whose condition reduces to a constant boolean collapses to the chosen branch (e.g. `local.enabled ? "on" : "off"` with `local.enabled = true` → `"on"`). The branch that isn't taken can reference unknowns; only the condition needs to be evaluatable.
+- Comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`) and logical (`&&`, `||`, `!`) operators whose operands are all constants collapse to `true` / `false` (e.g. `"aaa" == "aaa"` → `true`, `100 > 0` → `true`).
 
 Anything that still needs a runtime context (`var.X`, function calls, unresolved locals, etc.) falls back to plain token substitution.
 
@@ -104,6 +105,8 @@ resource "r" "a" {
   mode      = local.enabled ? "on" : "off"
   dead      = 0 > 0 ? foo.bar.zoo : null
   not_const = var.thing ? "x" : "y"
+  cmp       = local.obj.foo == 100
+  logical   = local.enabled && (10 > 1)
 }
 ```
 
@@ -125,6 +128,8 @@ resource "r" "a" {
   mode      = "on"
   dead      = null
   not_const = var.thing ? "x" : "y"
+  cmp       = true
+  logical   = true
 }
 ```
 
