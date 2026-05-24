@@ -16,9 +16,11 @@ import (
 
 func TestExpand_Golden(t *testing.T) {
 	cases := []struct {
-		name  string
-		prune bool
-		eval  bool
+		name   string
+		prune  bool
+		eval   bool
+		only   []string
+		except []string
 	}{
 		{name: "basic"},
 		{name: "chained"},
@@ -33,6 +35,9 @@ func TestExpand_Golden(t *testing.T) {
 		{name: "eval", eval: true},
 		{name: "eval-ternary", eval: true},
 		{name: "eval-binop", eval: true},
+		{name: "only", only: []string{"region", "name"}},
+		{name: "except", except: []string{"secret"}},
+		{name: "only-prune", prune: true, only: []string{"region"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,6 +46,8 @@ func TestExpand_Golden(t *testing.T) {
 			e.Verbose = true
 			e.Prune = tc.prune
 			e.Eval = tc.eval
+			e.Only = tc.only
+			e.Except = tc.except
 			require.NoError(t, e.Expand(true))
 			compareDir(t, tmp, filepath.Join("testdata", tc.name, "expected"))
 		})

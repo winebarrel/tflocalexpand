@@ -23,11 +23,13 @@ Arguments:
   [<dir>]    Directory containing *.tf files (default: ".").
 
 Flags:
-  -h, --help        Show help.
-  -i, --in-place    Write changes back to files instead of stdout.
-  -p, --prune       Expand inside locals blocks and remove local definitions with no remaining references.
-  -e, --eval        Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands).
-  -v, --verbose     Verbose logging.
+  -h, --help                 Show help.
+  -i, --in-place             Write changes back to files instead of stdout.
+  -p, --prune                Expand inside locals blocks and remove local definitions with no remaining references.
+  -e, --eval                 Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands).
+      --only=ONLY,...        Only expand these local names; leave others as 'local.<name>' references. Repeat or comma-separate. Mutually exclusive with --except.
+      --except=EXCEPT,...    Do not expand these local names; expand the rest. Repeat or comma-separate. Mutually exclusive with --only.
+  -v, --verbose              Verbose logging.
       --version
 ```
 
@@ -132,6 +134,48 @@ resource "r" "a" {
   logical   = true
 }
 ```
+
+## Selecting which locals to expand
+
+Pass `--only` to expand only the listed local names; any other `local.<name>` reference is left untouched. Pass `--except` to do the opposite — expand everything except the listed names. The two flags are mutually exclusive, and both accept multiple values (repeat the flag or comma-separate, e.g. `--only region,name`).
+
+```hcl
+# main.tf
+locals {
+  region = "us-east-1"
+  name   = "app"
+  port   = 8080
+  secret = "shh"
+}
+resource "foo" "bar" {
+  region = local.region
+  name   = local.name
+  port   = local.port
+  secret = local.secret
+}
+```
+
+```sh
+tflocalexpand -i --only region,name .
+```
+
+```hcl
+# main.tf (rewritten)
+locals {
+  region = "us-east-1"
+  name   = "app"
+  port   = 8080
+  secret = "shh"
+}
+resource "foo" "bar" {
+  region = "us-east-1"
+  name   = "app"
+  port   = local.port
+  secret = local.secret
+}
+```
+
+Combining with `--prune`: locals whose references remain (because they were filtered out by `--only`/`--except`) count as "used" and are kept. Locals that got fully expanded and are no longer referenced anywhere are still removed.
 
 ## Pruning unused locals
 
