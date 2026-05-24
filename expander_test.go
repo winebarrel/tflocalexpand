@@ -31,6 +31,7 @@ func TestExpand_Golden(t *testing.T) {
 		{name: "prune", prune: true},
 		{name: "prune-partial", prune: true},
 		{name: "eval", eval: true},
+		{name: "eval-ternary", eval: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,6 +269,24 @@ func TestAccessChainExtent_UnbalancedBreaks(t *testing.T) {
 		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("0")},
 	}
 	assert.Equal(t, 0, accessChainExtent(toks, 0))
+}
+
+func TestFoldStaticConditionals_Empty(t *testing.T) {
+	assert.Nil(t, foldStaticConditionals(nil, false))
+}
+
+func TestFoldOneConditional_ParseFailure(t *testing.T) {
+	// `?` alone is not a valid expression — parse fails, no fold.
+	src := []byte("?")
+	out, ok := foldOneConditional(src)
+	assert.False(t, ok)
+	assert.Equal(t, src, out)
+}
+
+func TestTokensFromExprSource_ParseFailure(t *testing.T) {
+	// `}` breaks the wrapped `x = }` parse.
+	_, ok := tokensFromExprSource([]byte("}"))
+	assert.False(t, ok)
 }
 
 func TestTryFoldAccess_ParseFailure(t *testing.T) {

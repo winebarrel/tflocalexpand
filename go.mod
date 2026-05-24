@@ -6,6 +6,7 @@ require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/stretchr/testify v1.11.1
+	github.com/zclconf/go-cty v1.16.3
 )
 
 require (
@@ -15,7 +16,6 @@ require (
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/zclconf/go-cty v1.16.3 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/sync v0.14.0 // indirect
 	golang.org/x/text v0.25.0 // indirect

@@ -26,7 +26,7 @@ Flags:
   -h, --help        Show help.
   -i, --in-place    Write changes back to files instead of stdout.
   -p, --prune       Expand inside locals blocks and remove local definitions with no remaining references.
-  -e, --eval        Fold direct attribute/index accesses on a substituted local (e.g. local.obj.foo) to a literal when fully evaluatable.
+  -e, --eval        Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition).
   -v, --verbose     Verbose logging.
       --version
 ```
@@ -81,20 +81,29 @@ Notes:
 - References to undefined locals are left as-is.
 - Circular references are reported as errors.
 
-## Folding direct accesses
+## Folding static expressions
 
-With `-e` / `--eval`, when a `local.<name>` reference is immediately followed by a chain of `.attr` / `[idx]` accessors, the substituted value plus the chain is evaluated as a constant expression. If it yields a concrete value, the whole reference collapses to a literal. Anything that needs a runtime context (`var.X`, function calls, etc.) falls back to the plain token substitution.
+With `-e` / `--eval`, expressions that become statically evaluatable after substitution are folded to literals:
+
+- A `local.<name>` followed by a chain of `.attr` / `[idx]` accessors is evaluated against the substituted value (e.g. `local.obj.foo` → `100`).
+- A ternary whose condition reduces to a constant boolean collapses to the chosen branch (e.g. `local.enabled ? "on" : "off"` with `local.enabled = true` → `"on"`). The branch that isn't taken can reference unknowns; only the condition needs to be evaluatable.
+
+Anything that still needs a runtime context (`var.X`, function calls, unresolved locals, etc.) falls back to plain token substitution.
 
 ```hcl
 # main.tf
 locals {
-  obj = { foo = 100, bar = "x" }
-  arr = [1, 2, 3]
+  obj     = { foo = 100, bar = "x" }
+  arr     = [1, 2, 3]
+  enabled = true
 }
 resource "r" "a" {
   attr      = local.obj.foo
   index     = local.arr[0]
   fallback  = local.obj.foo + var.something
+  mode      = local.enabled ? "on" : "off"
+  dead      = 0 > 0 ? foo.bar.zoo : null
+  not_const = var.thing ? "x" : "y"
 }
 ```
 
@@ -105,13 +114,17 @@ tflocalexpand -i -e .
 ```hcl
 # main.tf (rewritten)
 locals {
-  obj = { foo = 100, bar = "x" }
-  arr = [1, 2, 3]
+  obj     = { foo = 100, bar = "x" }
+  arr     = [1, 2, 3]
+  enabled = true
 }
 resource "r" "a" {
   attr      = 100
   index     = 1
   fallback  = 100 + var.something
+  mode      = "on"
+  dead      = null
+  not_const = var.thing ? "x" : "y"
 }
 ```
 
