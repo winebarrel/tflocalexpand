@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/zclconf/go-cty/cty"
 )
 
 type Expander struct {
@@ -354,7 +355,15 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 		out = append(out, in[i])
 		i++
 	}
-	return mergeQuotedLits(flattenStringTemplates(out))
+	out = mergeQuotedLits(flattenStringTemplates(out))
+	if eval {
+		out = foldStaticConditionals(out, verbose)
+		// Folding a ternary inside a template (e.g. `${true ? "b" : "c"}`)
+		// can produce new `${"..."}` / adjacent QuotedLit sequences that the
+		// earlier flatten/merge pass didn't see.
+		out = mergeQuotedLits(flattenStringTemplates(out))
+	}
+	return out
 }
 
 // accessChainExtent returns the end index (exclusive) of the chain of
@@ -410,6 +419,121 @@ func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
 		return nil, false
 	}
 	return hclwrite.TokensForValue(val), true
+}
+
+// foldStaticConditionals re-parses the given tokens as an HCL expression and
+// folds any ternary whose condition evaluates to a known boolean with a nil
+// context (i.e. depends only on constants). Non-foldable ternaries — including
+// those whose condition still references `var.X`, functions, or unresolved
+// `local.X` — are left untouched.
+func foldStaticConditionals(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
+	if len(in) == 0 || !hasQuestionToken(in) {
+		return in
+	}
+	src := in.Bytes()
+	changed := false
+	for {
+		next, didFold := foldOneConditional(src)
+		if !didFold {
+			break
+		}
+		src = next
+		changed = true
+		if verbose {
+			log.Printf("  - folding static conditional")
+		}
+	}
+	if !changed {
+		return in
+	}
+	out, ok := tokensFromExprSource(src)
+	if !ok {
+		return in
+	}
+	if len(out) > 0 {
+		out[0].SpacesBefore = in[0].SpacesBefore
+	}
+	return out
+}
+
+// hasQuestionToken reports whether the token slice contains a `?` token,
+// used as a cheap pre-check to skip the parse/walk work when no ternary is
+// present.
+func hasQuestionToken(in hclwrite.Tokens) bool {
+	for _, t := range in {
+		if t.Type == hclsyntax.TokenQuestion {
+			return true
+		}
+	}
+	return false
+}
+
+// foldOneConditional finds the first conditional whose condition is a known
+// boolean constant (DFS order) and replaces it with the selected branch's
+// source bytes. Returns the original src unchanged when none is found.
+func foldOneConditional(src []byte) ([]byte, bool) {
+	expr, diags := hclsyntax.ParseExpression(src, "", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		return src, false
+	}
+	finder := &condFinder{}
+	hclsyntax.Walk(expr, finder)
+	if finder.target == nil {
+		return src, false
+	}
+	tr := finder.target.Range()
+	cr := finder.chosen.Range()
+	out := make([]byte, 0, len(src))
+	out = append(out, src[:tr.Start.Byte]...)
+	out = append(out, src[cr.Start.Byte:cr.End.Byte]...)
+	out = append(out, src[tr.End.Byte:]...)
+	return out, true
+}
+
+// condFinder walks an HCL AST and captures the first ConditionalExpr whose
+// condition evaluates to a known bool with an empty eval context.
+type condFinder struct {
+	target *hclsyntax.ConditionalExpr
+	chosen hclsyntax.Expression
+}
+
+func (f *condFinder) Enter(n hclsyntax.Node) hcl.Diagnostics {
+	if f.target != nil {
+		return nil
+	}
+	c, ok := n.(*hclsyntax.ConditionalExpr)
+	if !ok {
+		return nil
+	}
+	v, d := c.Condition.Value(nil)
+	if d.HasErrors() || !v.IsWhollyKnown() || v.Type() != cty.Bool || v.IsNull() {
+		return nil
+	}
+	f.target = c
+	if v.True() {
+		f.chosen = c.TrueResult
+	} else {
+		f.chosen = c.FalseResult
+	}
+	return nil
+}
+
+func (f *condFinder) Exit(hclsyntax.Node) hcl.Diagnostics { return nil }
+
+// tokensFromExprSource re-tokenizes an expression source by parsing it as a
+// trivial attribute and lifting its expression tokens. Returns (nil, false) if
+// the source does not round-trip as a valid HCL expression.
+func tokensFromExprSource(src []byte) (hclwrite.Tokens, bool) {
+	wrapped := append([]byte("x = "), src...)
+	f, diags := hclwrite.ParseConfig(wrapped, "", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		return nil, false
+	}
+	attr := f.Body().GetAttribute("x")
+	if attr == nil {
+		return nil, false
+	}
+	return attr.Expr().BuildTokens(nil), true
 }
 
 // flattenStringTemplates rewrites `${"..."}` sequences to inline their content,
