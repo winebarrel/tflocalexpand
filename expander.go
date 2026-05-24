@@ -358,6 +358,10 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 	out = mergeQuotedLits(flattenStringTemplates(out))
 	if eval {
 		out = foldStaticConditionals(out, verbose)
+		// Folding a ternary inside a template (e.g. `${true ? "b" : "c"}`)
+		// can produce new `${"..."}` / adjacent QuotedLit sequences that the
+		// earlier flatten/merge pass didn't see.
+		out = mergeQuotedLits(flattenStringTemplates(out))
 	}
 	return out
 }
@@ -423,7 +427,7 @@ func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
 // those whose condition still references `var.X`, functions, or unresolved
 // `local.X` — are left untouched.
 func foldStaticConditionals(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
-	if len(in) == 0 {
+	if len(in) == 0 || !hasQuestionToken(in) {
 		return in
 	}
 	src := in.Bytes()
@@ -450,6 +454,18 @@ func foldStaticConditionals(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
 		out[0].SpacesBefore = in[0].SpacesBefore
 	}
 	return out
+}
+
+// hasQuestionToken reports whether the token slice contains a `?` token,
+// used as a cheap pre-check to skip the parse/walk work when no ternary is
+// present.
+func hasQuestionToken(in hclwrite.Tokens) bool {
+	for _, t := range in {
+		if t.Type == hclsyntax.TokenQuestion {
+			return true
+		}
+	}
+	return false
 }
 
 // foldOneConditional finds the first conditional whose condition is a known

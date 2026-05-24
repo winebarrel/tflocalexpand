@@ -9,4 +9,5 @@ resource "r" "a" {
   size_check    = local.size > 0 ? "big" : "small"
   not_static    = var.thing ? "x" : "y"
   nested_inner  = var.x ? (true ? "ok" : "ko") : "fallback"
+  in_template   = "a${local.enabled ? "b" : "c"}d"
 }

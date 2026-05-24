@@ -9,4 +9,5 @@ resource "r" "a" {
   size_check    = "small"
   not_static    = var.thing ? "x" : "y"
   nested_inner  = var.x ? ("ok") : "fallback"
+  in_template   = "abd"
 }
