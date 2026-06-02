@@ -283,7 +283,7 @@ func splitPrefixedNames(names []string) (locals, vars map[string]bool, err error
 		case strings.HasPrefix(n, "var."):
 			vars[strings.TrimPrefix(n, "var.")] = true
 		default:
-			return nil, nil, fmt.Errorf("%q must be prefixed with local. or var.", n)
+			return nil, nil, fmt.Errorf("%q must be prefixed with \"local.\" or \"var.\"", n)
 		}
 	}
 	return locals, vars, nil
