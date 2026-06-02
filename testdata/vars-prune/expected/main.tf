@@ -3,4 +3,5 @@ variable "no_default" {
 }
 resource "foo" "bar" {
   name = "u"
+  who  = var.no_default
 }

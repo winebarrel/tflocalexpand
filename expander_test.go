@@ -111,6 +111,34 @@ func TestExpand_OnlyVarWithoutVarsFlag(t *testing.T) {
 	assert.Contains(t, err.Error(), "--vars")
 }
 
+func TestExpand_ExceptBareName(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	e := NewExpander(tmp)
+	e.Except = []string{"region"}
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--except")
+}
+
+func TestCollectVariables_SkipsBlocksWithUnexpectedLabels(t *testing.T) {
+	f := hclwrite.NewEmptyFile()
+	f.Body().AppendNewBlock("variable", nil)
+	f.Body().AppendNewBlock("variable", []string{"a", "b"})
+	e := NewExpander("")
+	e.Vars = true
+	e.files["test.tf"] = f
+	require.NoError(t, e.collectVariables())
+	assert.Empty(t, e.varsRaw)
+}
+
+func TestRemoveUnusedFromBody_VariableBlockWithUnexpectedLabels(t *testing.T) {
+	f := hclwrite.NewEmptyFile()
+	f.Body().AppendNewBlock("variable", nil)
+	f.Body().AppendNewBlock("variable", []string{"a", "b"})
+	changed := removeUnusedFromBody(f.Body(), nil, nil, map[string]hclwrite.Tokens{}, false)
+	assert.False(t, changed)
+}
+
 func TestExpand_StdoutMode(t *testing.T) {
 	tmp := copyInputToTemp(t, "testdata/basic/input")
 	var buf bytes.Buffer

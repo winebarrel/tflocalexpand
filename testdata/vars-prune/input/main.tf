@@ -9,4 +9,5 @@ variable "no_default" {
 }
 resource "foo" "bar" {
   name = var.used
+  who  = var.no_default
 }
