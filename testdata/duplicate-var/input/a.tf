@@ -1,0 +1,3 @@
+variable "dup" {
+  default = "a"
+}

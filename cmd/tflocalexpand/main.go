@@ -17,10 +17,11 @@ func init() {
 type options struct {
 	Dir     string   `arg:"" optional:"" default:"." help:"Directory containing *.tf files (default: \".\")."`
 	InPlace bool     `short:"i" help:"Write changes back to files instead of stdout."`
-	Prune   bool     `short:"p" help:"Expand inside locals blocks and remove local definitions with no remaining references."`
-	Eval    bool     `short:"e" help:"Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands)."`
-	Only    []string `xor:"select" help:"Only expand these local names; leave others as 'local.<name>' references. Repeat or comma-separate. Mutually exclusive with --except."`
-	Except  []string `xor:"select" help:"Do not expand these local names; expand the rest. Repeat or comma-separate. Mutually exclusive with --only."`
+	Prune   bool     `short:"p" help:"Expand inside locals blocks and remove local definitions with no remaining references. With --vars, also drop unused variable blocks that have a default."`
+	Eval    bool     `short:"e" help:"Fold expressions that become statically evaluatable after substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands)."`
+	Vars    bool     `help:"Also expand var.<name> references using each variable's default value. Variables without a default are left as 'var.<name>'."`
+	Only    []string `xor:"select" help:"Only expand these references; leave the rest as-is. Names must be prefixed with 'local.' or 'var.' (e.g. 'local.region,var.port'). Repeat or comma-separate. Mutually exclusive with --except."`
+	Except  []string `xor:"select" help:"Do not expand these references; expand the rest. Names must be prefixed with 'local.' or 'var.'. Repeat or comma-separate. Mutually exclusive with --only."`
 	Verbose bool     `short:"v" help:"Verbose logging."`
 	Version kong.VersionFlag
 }
@@ -45,6 +46,7 @@ func main() {
 	e.Verbose = opts.Verbose
 	e.Prune = opts.Prune
 	e.Eval = opts.Eval
+	e.Vars = opts.Vars
 	e.Only = opts.Only
 	e.Except = opts.Except
 	if err := e.Expand(opts.InPlace); err != nil {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -21,12 +22,15 @@ type Expander struct {
 	Verbose bool
 	Prune   bool
 	Eval    bool
+	Vars    bool
 	Only    []string
 	Except  []string
 
 	files     map[string]*hclwrite.File
 	localsRaw map[string]hclwrite.Tokens
 	localsDef map[string]string
+	varsRaw   map[string]hclwrite.Tokens
+	varsDef   map[string]string
 	resolved  map[string]hclwrite.Tokens
 }
 
@@ -37,6 +41,8 @@ func NewExpander(dir string) *Expander {
 		files:     map[string]*hclwrite.File{},
 		localsRaw: map[string]hclwrite.Tokens{},
 		localsDef: map[string]string{},
+		varsRaw:   map[string]hclwrite.Tokens{},
+		varsDef:   map[string]string{},
 		resolved:  map[string]hclwrite.Tokens{},
 	}
 }
@@ -46,6 +52,9 @@ func (e *Expander) Expand(inPlace bool) error {
 		return err
 	}
 	if err := e.collectLocals(); err != nil {
+		return err
+	}
+	if err := e.collectVariables(); err != nil {
 		return err
 	}
 	if err := e.resolveLocals(); err != nil {
@@ -98,6 +107,37 @@ func (e *Expander) collectLocals() error {
 	return nil
 }
 
+// collectVariables records the default expression of each `variable "<name>"`
+// block. Variables without a `default` are tracked in varsDef for duplicate
+// detection but stay as `var.<name>` references. No-op when Vars is false.
+func (e *Expander) collectVariables() error {
+	if !e.Vars {
+		return nil
+	}
+	for path, f := range e.files {
+		for _, block := range f.Body().Blocks() {
+			if block.Type() != "variable" {
+				continue
+			}
+			labels := block.Labels()
+			if len(labels) != 1 {
+				continue
+			}
+			name := labels[0]
+			if existing, dup := e.varsDef[name]; dup {
+				return fmt.Errorf("duplicate variable %q (defined in %s and %s)", name, existing, path)
+			}
+			e.varsDef[name] = path
+			def := block.Body().GetAttribute("default")
+			if def == nil {
+				continue
+			}
+			e.varsRaw[name] = def.Expr().BuildTokens(nil)
+		}
+	}
+	return nil
+}
+
 func (e *Expander) resolveLocals() error {
 	visiting := map[string]bool{}
 	var resolve func(name string) error
@@ -120,7 +160,7 @@ func (e *Expander) resolveLocals() error {
 				return err
 			}
 		}
-		e.resolved[name] = replaceLocalRefs(raw, e.resolved, e.Verbose, e.Eval)
+		e.resolved[name] = replaceRefs(raw, e.resolved, e.varsRaw, e.Verbose, e.Eval)
 		return nil
 	}
 	names := make([]string, 0, len(e.localsRaw))
@@ -143,17 +183,20 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 	}
 	sort.Strings(paths)
 
-	resolved := e.filteredResolved()
+	locals, vars, err := e.filteredResolved()
+	if err != nil {
+		return err
+	}
 	changedFiles := map[string]bool{}
 	for _, path := range paths {
 		f := e.files[path]
-		if rewriteBody(f.Body(), resolved, e.Verbose, e.Prune, e.Eval) {
+		if rewriteBody(f.Body(), locals, vars, e.Verbose, e.Prune, e.Eval) {
 			changedFiles[path] = true
 		}
 	}
 
 	if e.Prune {
-		e.pruneUnusedLocals(changedFiles)
+		e.pruneUnused(changedFiles)
 	}
 
 	for _, path := range paths {
@@ -178,54 +221,99 @@ func (e *Expander) rewriteAll(inPlace bool) error {
 	return nil
 }
 
-func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose, includeLocals, eval bool) bool {
+func rewriteBody(body *hclwrite.Body, locals, vars map[string]hclwrite.Tokens, verbose, includeDefs, eval bool) bool {
 	changed := false
 	for name, attr := range body.Attributes() {
 		orig := attr.Expr().BuildTokens(nil)
-		repl := replaceLocalRefs(orig, locals, verbose, eval)
+		repl := replaceRefs(orig, locals, vars, verbose, eval)
 		if !tokensEqual(orig, repl) {
 			body.SetAttributeRaw(name, repl)
 			changed = true
 		}
 	}
 	for _, blk := range body.Blocks() {
-		if blk.Type() == "locals" && !includeLocals {
+		if blk.Type() == "locals" && !includeDefs {
 			continue
 		}
-		if rewriteBody(blk.Body(), locals, verbose, includeLocals, eval) {
+		if blk.Type() == "variable" {
+			continue
+		}
+		if rewriteBody(blk.Body(), locals, vars, verbose, includeDefs, eval) {
 			changed = true
 		}
 	}
 	return changed
 }
 
-// filteredResolved returns the resolved-locals map narrowed by Only/Except.
-// Names absent from the returned map stay as `local.<name>` references after
-// rewriting. Chain resolution in resolveLocals uses the unfiltered map, so
-// expanded values are complete even when dependencies are excluded from the
-// user-facing rewrite.
-func (e *Expander) filteredResolved() map[string]hclwrite.Tokens {
+// filteredResolved returns the resolved locals and variables narrowed by
+// Only/Except. Names absent from the returned maps stay as `local.<name>` or
+// `var.<name>` references after rewriting. Chain resolution in resolveLocals
+// uses the unfiltered maps, so expanded values are complete even when
+// dependencies are excluded from the user-facing rewrite.
+func (e *Expander) filteredResolved() (map[string]hclwrite.Tokens, map[string]hclwrite.Tokens, error) {
 	if len(e.Only) == 0 && len(e.Except) == 0 {
-		return e.resolved
+		return e.resolved, e.varsRaw, nil
 	}
-	out := map[string]hclwrite.Tokens{}
-	if len(e.Only) > 0 {
-		allow := map[string]bool{}
-		for _, n := range e.Only {
-			allow[n] = true
+	onlyLocals, onlyVars, err := splitPrefixedNames(e.Only)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--only: %w", err)
+	}
+	exceptLocals, exceptVars, err := splitPrefixedNames(e.Except)
+	if err != nil {
+		return nil, nil, fmt.Errorf("--except: %w", err)
+	}
+	if !e.Vars && (len(onlyVars) > 0 || len(exceptVars) > 0) {
+		return nil, nil, fmt.Errorf("var.<name> in --only/--except requires --vars")
+	}
+	useAllow := len(e.Only) > 0
+	return filterRefs(e.resolved, onlyLocals, exceptLocals, useAllow),
+		filterRefs(e.varsRaw, onlyVars, exceptVars, useAllow),
+		nil
+}
+
+// splitPrefixedNames parses `local.X` / `var.X` names into separate sets.
+// Surrounding whitespace is trimmed. Bare names (no prefix), names with an
+// empty suffix, and suffixes containing `.` (e.g. `local.a.b`) all return
+// an error.
+func splitPrefixedNames(names []string) (locals, vars map[string]bool, err error) {
+	locals = map[string]bool{}
+	vars = map[string]bool{}
+	for _, raw := range names {
+		n := strings.TrimSpace(raw)
+		var dst map[string]bool
+		var suffix string
+		switch {
+		case strings.HasPrefix(n, "local."):
+			dst = locals
+			suffix = strings.TrimPrefix(n, "local.")
+		case strings.HasPrefix(n, "var."):
+			dst = vars
+			suffix = strings.TrimPrefix(n, "var.")
+		default:
+			return nil, nil, fmt.Errorf("%q must be prefixed with \"local.\" or \"var.\"", n)
 		}
-		for name, tokens := range e.resolved {
+		if suffix == "" {
+			return nil, nil, fmt.Errorf("%q has no name after the prefix", n)
+		}
+		if strings.Contains(suffix, ".") {
+			return nil, nil, fmt.Errorf("%q: name must be a single identifier", n)
+		}
+		dst[suffix] = true
+	}
+	return locals, vars, nil
+}
+
+func filterRefs(in map[string]hclwrite.Tokens, allow, deny map[string]bool, useAllow bool) map[string]hclwrite.Tokens {
+	out := map[string]hclwrite.Tokens{}
+	if useAllow {
+		for name, tokens := range in {
 			if allow[name] {
 				out[name] = tokens
 			}
 		}
 		return out
 	}
-	deny := map[string]bool{}
-	for _, n := range e.Except {
-		deny[n] = true
-	}
-	for name, tokens := range e.resolved {
+	for name, tokens := range in {
 		if !deny[name] {
 			out[name] = tokens
 		}
@@ -233,53 +321,88 @@ func (e *Expander) filteredResolved() map[string]hclwrite.Tokens {
 	return out
 }
 
-// pruneUnusedLocals removes local definitions whose `local.<name>` is not
-// referenced anywhere after expansion, and drops empty `locals` blocks.
-func (e *Expander) pruneUnusedLocals(changedFiles map[string]bool) {
-	used := map[string]bool{}
+// pruneUnused removes local definitions whose `local.<name>` is not
+// referenced after expansion, drops empty `locals` blocks, and (when Vars is
+// enabled) removes `variable` blocks with a default whose `var.<name>` is no
+// longer referenced. Variables without a default are kept.
+func (e *Expander) pruneUnused(changedFiles map[string]bool) {
+	usedLocals := map[string]bool{}
+	usedVars := map[string]bool{}
 	for _, f := range e.files {
-		collectAllLocalRefs(f.Body(), used)
+		collectAllRefs(f.Body(), usedLocals, usedVars)
 	}
 	for path, f := range e.files {
-		if removeUnusedLocalsFromBody(f.Body(), used, e.Verbose) {
+		if removeUnusedFromBody(f.Body(), usedLocals, usedVars, e.varsRaw, e.Verbose) {
 			changedFiles[path] = true
 		}
 	}
 }
 
-func collectAllLocalRefs(body *hclwrite.Body, used map[string]bool) {
+func collectAllRefs(body *hclwrite.Body, usedLocals, usedVars map[string]bool) {
 	for _, attr := range body.Attributes() {
-		for _, name := range collectLocalRefs(attr.Expr().BuildTokens(nil)) {
-			used[name] = true
+		tokens := attr.Expr().BuildTokens(nil)
+		for i := 0; i < len(tokens); i++ {
+			name, kind, ok := isRefStart(tokens, i)
+			if !ok {
+				continue
+			}
+			switch kind {
+			case "local":
+				usedLocals[name] = true
+			case "var":
+				usedVars[name] = true
+			}
+			i += 2
 		}
 	}
 	for _, blk := range body.Blocks() {
-		collectAllLocalRefs(blk.Body(), used)
+		if blk.Type() == "variable" {
+			continue
+		}
+		collectAllRefs(blk.Body(), usedLocals, usedVars)
 	}
 }
 
-func removeUnusedLocalsFromBody(body *hclwrite.Body, used map[string]bool, verbose bool) bool {
+func removeUnusedFromBody(body *hclwrite.Body, usedLocals, usedVars map[string]bool, varsWithDefault map[string]hclwrite.Tokens, verbose bool) bool {
 	changed := false
 	for _, blk := range body.Blocks() {
-		if blk.Type() != "locals" {
-			if removeUnusedLocalsFromBody(blk.Body(), used, verbose) {
+		switch blk.Type() {
+		case "locals":
+			for name := range blk.Body().Attributes() {
+				if usedLocals[name] {
+					continue
+				}
+				blk.Body().RemoveAttribute(name)
+				if verbose {
+					log.Printf("  - pruning unused local.%s", name)
+				}
 				changed = true
 			}
-			continue
-		}
-		for name := range blk.Body().Attributes() {
-			if used[name] {
+			if len(blk.Body().Attributes()) == 0 && len(blk.Body().Blocks()) == 0 {
+				body.RemoveBlock(blk)
+				changed = true
+			}
+		case "variable":
+			labels := blk.Labels()
+			if len(labels) != 1 {
 				continue
 			}
-			blk.Body().RemoveAttribute(name)
+			name := labels[0]
+			if usedVars[name] {
+				continue
+			}
+			if _, hadDefault := varsWithDefault[name]; !hadDefault {
+				continue
+			}
+			body.RemoveBlock(blk)
 			if verbose {
-				log.Printf("  - pruning unused local.%s", name)
+				log.Printf("  - pruning unused var.%s", name)
 			}
 			changed = true
-		}
-		if len(blk.Body().Attributes()) == 0 && len(blk.Body().Blocks()) == 0 {
-			body.RemoveBlock(blk)
-			changed = true
+		default:
+			if removeUnusedFromBody(blk.Body(), usedLocals, usedVars, varsWithDefault, verbose) {
+				changed = true
+			}
 		}
 	}
 	return changed
@@ -298,14 +421,16 @@ func tokensEqual(a, b hclwrite.Tokens) bool {
 }
 
 // collectLocalRefs returns names referenced via `local.<name>` in tokens.
+// `var.<name>` references are ignored because variables do not chain into the
+// locals resolution graph.
 func collectLocalRefs(tokens hclwrite.Tokens) []string {
 	var out []string
 	seen := map[string]bool{}
 	for i := 0; i < len(tokens); i++ {
-		if !isLocalRefStart(tokens, i) {
+		name, kind, ok := isRefStart(tokens, i)
+		if !ok || kind != "local" {
 			continue
 		}
-		name := string(tokens[i+2].Bytes)
 		if !seen[name] {
 			out = append(out, name)
 			seen[name] = true
@@ -315,42 +440,54 @@ func collectLocalRefs(tokens hclwrite.Tokens) []string {
 	return out
 }
 
-// isLocalRefStart reports whether tokens[i:i+3] is `local.<ident>` and is not
-// preceded by `.` (which would make it part of an outer attribute access).
-func isLocalRefStart(tokens hclwrite.Tokens, i int) bool {
+// isRefStart reports whether tokens[i:i+3] is `local.<ident>` or `var.<ident>`
+// and is not preceded by `.` (which would make it part of an outer attribute
+// access). Returns the bare name and the matched prefix ("local" or "var").
+func isRefStart(tokens hclwrite.Tokens, i int) (string, string, bool) {
 	if i+2 >= len(tokens) {
-		return false
+		return "", "", false
 	}
 	t0, t1, t2 := tokens[i], tokens[i+1], tokens[i+2]
-	if t0.Type != hclsyntax.TokenIdent || string(t0.Bytes) != "local" {
-		return false
+	if t0.Type != hclsyntax.TokenIdent {
+		return "", "", false
+	}
+	prefix := string(t0.Bytes)
+	if prefix != "local" && prefix != "var" {
+		return "", "", false
 	}
 	if t1.Type != hclsyntax.TokenDot {
-		return false
+		return "", "", false
 	}
 	if t2.Type != hclsyntax.TokenIdent {
-		return false
+		return "", "", false
 	}
 	if i > 0 && tokens[i-1].Type == hclsyntax.TokenDot {
-		return false
+		return "", "", false
 	}
-	return true
+	return string(t2.Bytes), prefix, true
 }
 
-// replaceLocalRefs returns a new token slice with `local.X` references
-// replaced by the resolved tokens, parenthesized when needed. When eval is
-// true and a substituted local is followed by a chain of `.attr` / `[idx]`
-// accessors that can be evaluated in an empty context, the chain is folded
-// to a literal.
-func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, verbose, eval bool) hclwrite.Tokens {
+// replaceRefs returns a new token slice with `local.X` and `var.X` references
+// replaced by their resolved tokens, parenthesized when needed. References
+// whose name is absent from the corresponding map are left as-is. When eval
+// is true and a substituted reference is followed by a chain of `.attr` /
+// `[idx]` accessors that can be evaluated in an empty context, the chain is
+// folded to a literal.
+func replaceRefs(in hclwrite.Tokens, locals, vars map[string]hclwrite.Tokens, verbose, eval bool) hclwrite.Tokens {
 	in = cloneTokens(in)
 	out := make(hclwrite.Tokens, 0, len(in))
 	i := 0
 	for i < len(in) {
-		if isLocalRefStart(in, i) {
-			name := string(in[i+2].Bytes)
-			repl, ok := locals[name]
-			if !ok {
+		if name, prefix, ok := isRefStart(in, i); ok {
+			var repl hclwrite.Tokens
+			var has bool
+			switch prefix {
+			case "local":
+				repl, has = locals[name]
+			case "var":
+				repl, has = vars[name]
+			}
+			if !has {
 				out = append(out, in[i], in[i+1], in[i+2])
 				i += 3
 				continue
@@ -371,7 +508,7 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 						folded[0].SpacesBefore = leadSpaces
 					}
 					if verbose {
-						log.Printf("  - expanding local.%s (folded)", name)
+						log.Printf("  - expanding %s.%s (folded)", prefix, name)
 					}
 					out = append(out, folded...)
 					i = chainEnd
@@ -383,7 +520,7 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 				replCopy[0].SpacesBefore = leadSpaces
 			}
 			if verbose {
-				log.Printf("  - expanding local.%s", name)
+				log.Printf("  - expanding %s.%s", prefix, name)
 			}
 			out = append(out, replCopy...)
 			i += 3
