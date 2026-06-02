@@ -25,10 +25,11 @@ Arguments:
 Flags:
   -h, --help                 Show help.
   -i, --in-place             Write changes back to files instead of stdout.
-  -p, --prune                Expand inside locals blocks and remove local definitions with no remaining references.
-  -e, --eval                 Fold expressions that become statically evaluatable after local substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands).
-      --only=ONLY,...        Only expand these local names; leave others as 'local.<name>' references. Repeat or comma-separate. Mutually exclusive with --except.
-      --except=EXCEPT,...    Do not expand these local names; expand the rest. Repeat or comma-separate. Mutually exclusive with --only.
+  -p, --prune                Expand inside locals blocks and remove local definitions with no remaining references. With --vars, also drop unused variable blocks that have a default.
+  -e, --eval                 Fold expressions that become statically evaluatable after substitution (attribute/index accesses, ternaries with a constant condition, comparison/logical operators with constant operands).
+      --vars                 Also expand var.<name> references using each variable's default value. Variables without a default are left as 'var.<name>'.
+      --only=ONLY,...        Only expand these references; leave the rest as-is. Names must be prefixed with 'local.' or 'var.' (e.g. 'local.region,var.port'). Repeat or comma-separate. Mutually exclusive with --except.
+      --except=EXCEPT,...    Do not expand these references; expand the rest. Names must be prefixed with 'local.' or 'var.'. Repeat or comma-separate. Mutually exclusive with --only.
   -v, --verbose              Verbose logging.
       --version
 ```
@@ -135,9 +136,47 @@ resource "r" "a" {
 }
 ```
 
-## Selecting which locals to expand
+## Expanding variables
 
-Pass `--only` to expand only the listed local names; any other `local.<name>` reference is left as-is. Pass `--except` to expand everything except the listed names. The two flags are mutually exclusive, and both accept multiple values (repeat the flag or comma-separate, e.g. `--only region,name`).
+With `--vars`, `var.<name>` references are also expanded using each variable's `default` value. Variables without a `default` are left as `var.<name>` (the default is what makes them safe to inline). With `--prune`, unused `variable` blocks that had a `default` are also dropped; blocks without a `default` are kept.
+
+```hcl
+# main.tf
+variable "region" {
+  default = "us-east-1"
+}
+variable "no_default" {
+  type = string
+}
+resource "foo" "bar" {
+  region = var.region
+  who    = var.no_default
+}
+```
+
+```sh
+tflocalexpand -i --vars .
+```
+
+```hcl
+# main.tf (rewritten)
+variable "region" {
+  default = "us-east-1"
+}
+variable "no_default" {
+  type = string
+}
+resource "foo" "bar" {
+  region = "us-east-1"
+  who    = var.no_default
+}
+```
+
+Note that this changes Terraform's behavior: variables can normally be overridden at apply time (`-var`, `*.tfvars`, `TF_VAR_*` env vars), but once expanded the value is baked into the source.
+
+## Selecting which references to expand
+
+Pass `--only` to expand only the listed references; everything else is left as-is. Pass `--except` to expand everything except the listed names. Names must be prefixed with `local.` or `var.` (e.g. `local.region`, `var.port`). The two flags are mutually exclusive, and both accept multiple values (repeat the flag or comma-separate, e.g. `--only local.region,local.name`).
 
 ```hcl
 # main.tf
@@ -156,7 +195,7 @@ resource "foo" "bar" {
 ```
 
 ```sh
-tflocalexpand -i --only region,name .
+tflocalexpand -i --only local.region,local.name .
 ```
 
 ```hcl

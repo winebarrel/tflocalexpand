@@ -19,6 +19,7 @@ func TestExpand_Golden(t *testing.T) {
 		name   string
 		prune  bool
 		eval   bool
+		vars   bool
 		only   []string
 		except []string
 	}{
@@ -35,9 +36,14 @@ func TestExpand_Golden(t *testing.T) {
 		{name: "eval", eval: true},
 		{name: "eval-ternary", eval: true},
 		{name: "eval-binop", eval: true},
-		{name: "only", only: []string{"region", "name"}},
-		{name: "except", except: []string{"secret"}},
-		{name: "only-prune", prune: true, only: []string{"region"}},
+		{name: "only", only: []string{"local.region", "local.name"}},
+		{name: "except", except: []string{"local.secret"}},
+		{name: "only-prune", prune: true, only: []string{"local.region"}},
+		{name: "vars", vars: true},
+		{name: "vars-mixed", vars: true},
+		{name: "vars-eval", vars: true, eval: true},
+		{name: "vars-prune", vars: true, prune: true},
+		{name: "vars-only", vars: true, only: []string{"local.region", "var.port"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,6 +52,7 @@ func TestExpand_Golden(t *testing.T) {
 			e.Verbose = true
 			e.Prune = tc.prune
 			e.Eval = tc.eval
+			e.Vars = tc.vars
 			e.Only = tc.only
 			e.Except = tc.except
 			require.NoError(t, e.Expand(true))
@@ -75,6 +82,33 @@ func TestExpand_DuplicateLocal(t *testing.T) {
 	err := e.Expand(true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicate local")
+}
+
+func TestExpand_DuplicateVariable(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/duplicate-var/input")
+	e := NewExpander(tmp)
+	e.Vars = true
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate variable")
+}
+
+func TestExpand_OnlyBareName(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	e := NewExpander(tmp)
+	e.Only = []string{"region"}
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "local.")
+}
+
+func TestExpand_OnlyVarWithoutVarsFlag(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	e := NewExpander(tmp)
+	e.Only = []string{"var.foo"}
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--vars")
 }
 
 func TestExpand_StdoutMode(t *testing.T) {
@@ -118,7 +152,7 @@ func TestExpand_LoadReadError(t *testing.T) {
 
 // ----------------- unit tests for internal helpers -----------------
 
-func TestIsLocalRefStart_PrecededByDot(t *testing.T) {
+func TestIsRefStart_PrecededByDot(t *testing.T) {
 	toks := hclwrite.Tokens{
 		{Type: hclsyntax.TokenIdent, Bytes: []byte("foo")},
 		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
@@ -126,25 +160,50 @@ func TestIsLocalRefStart_PrecededByDot(t *testing.T) {
 		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
 		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
 	}
-	assert.False(t, isLocalRefStart(toks, 2))
+	_, _, ok := isRefStart(toks, 2)
+	assert.False(t, ok)
 }
 
-func TestIsLocalRefStart_NonDotMiddle(t *testing.T) {
+func TestIsRefStart_NonDotMiddle(t *testing.T) {
 	toks := hclwrite.Tokens{
 		{Type: hclsyntax.TokenIdent, Bytes: []byte("local")},
 		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
 		{Type: hclsyntax.TokenIdent, Bytes: []byte("x")},
 	}
-	assert.False(t, isLocalRefStart(toks, 0))
+	_, _, ok := isRefStart(toks, 0)
+	assert.False(t, ok)
 }
 
-func TestIsLocalRefStart_NonIdentEnd(t *testing.T) {
+func TestIsRefStart_NonIdentEnd(t *testing.T) {
 	toks := hclwrite.Tokens{
 		{Type: hclsyntax.TokenIdent, Bytes: []byte("local")},
 		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
 		{Type: hclsyntax.TokenStar, Bytes: []byte("*")},
 	}
-	assert.False(t, isLocalRefStart(toks, 0))
+	_, _, ok := isRefStart(toks, 0)
+	assert.False(t, ok)
+}
+
+func TestIsRefStart_Var(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("var")},
+		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("foo")},
+	}
+	name, prefix, ok := isRefStart(toks, 0)
+	assert.True(t, ok)
+	assert.Equal(t, "foo", name)
+	assert.Equal(t, "var", prefix)
+}
+
+func TestIsRefStart_OtherIdent(t *testing.T) {
+	toks := hclwrite.Tokens{
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("data")},
+		{Type: hclsyntax.TokenDot, Bytes: []byte(".")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("foo")},
+	}
+	_, _, ok := isRefStart(toks, 0)
+	assert.False(t, ok)
 }
 
 func TestNeedsParens_Cases(t *testing.T) {
@@ -306,7 +365,7 @@ func TestTryFoldAccess_ParseFailure(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestRemoveUnusedLocalsFromBody_KeepsReferenced(t *testing.T) {
+func TestRemoveUnusedFromBody_KeepsReferenced(t *testing.T) {
 	src := []byte(`locals {
   keep = "k"
   drop = "d"
@@ -315,8 +374,8 @@ func TestRemoveUnusedLocalsFromBody_KeepsReferenced(t *testing.T) {
 	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
 	require.False(t, diags.HasErrors())
 
-	used := map[string]bool{"keep": true}
-	changed := removeUnusedLocalsFromBody(f.Body(), used, false)
+	usedLocals := map[string]bool{"keep": true}
+	changed := removeUnusedFromBody(f.Body(), usedLocals, nil, nil, false)
 	assert.True(t, changed)
 
 	assert.Equal(t, `locals {
@@ -325,7 +384,7 @@ func TestRemoveUnusedLocalsFromBody_KeepsReferenced(t *testing.T) {
 `, string(f.Bytes()))
 }
 
-func TestRemoveUnusedLocalsFromBody_RecursesIntoNonLocalsBlocks(t *testing.T) {
+func TestRemoveUnusedFromBody_RecursesIntoNonLocalsBlocks(t *testing.T) {
 	// A `locals` block nested inside another block is unusual for Terraform
 	// but the HCL parser accepts it; the prune pass should still reach it.
 	src := []byte(`module "m" {
@@ -337,9 +396,40 @@ func TestRemoveUnusedLocalsFromBody_RecursesIntoNonLocalsBlocks(t *testing.T) {
 	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
 	require.False(t, diags.HasErrors())
 
-	changed := removeUnusedLocalsFromBody(f.Body(), map[string]bool{}, false)
+	changed := removeUnusedFromBody(f.Body(), map[string]bool{}, nil, nil, false)
 	assert.True(t, changed)
 	assert.Equal(t, `module "m" {
+}
+`, string(f.Bytes()))
+}
+
+func TestRemoveUnusedFromBody_PrunesVariable(t *testing.T) {
+	src := []byte(`variable "drop" {
+  default = "d"
+}
+variable "keep_no_default" {
+  type = string
+}
+variable "keep_used" {
+  default = "u"
+}
+`)
+	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+
+	varsWithDefault := map[string]hclwrite.Tokens{
+		"drop":      {{Type: hclsyntax.TokenQuotedLit, Bytes: []byte("d")}},
+		"keep_used": {{Type: hclsyntax.TokenQuotedLit, Bytes: []byte("u")}},
+	}
+	usedVars := map[string]bool{"keep_used": true}
+	changed := removeUnusedFromBody(f.Body(), map[string]bool{}, usedVars, varsWithDefault, false)
+	assert.True(t, changed)
+
+	assert.Equal(t, `variable "keep_no_default" {
+  type = string
+}
+variable "keep_used" {
+  default = "u"
 }
 `, string(f.Bytes()))
 }
