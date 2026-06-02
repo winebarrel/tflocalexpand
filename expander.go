@@ -108,13 +108,12 @@ func (e *Expander) collectLocals() error {
 }
 
 // collectVariables records the default expression of each `variable "<name>"`
-// block. Variables without a `default` are tracked for duplicate detection
-// but stay as `var.<name>` references. No-op when Vars is false.
+// block. Variables without a `default` are tracked in varsDef for duplicate
+// detection but stay as `var.<name>` references. No-op when Vars is false.
 func (e *Expander) collectVariables() error {
 	if !e.Vars {
 		return nil
 	}
-	seen := map[string]string{}
 	for path, f := range e.files {
 		for _, block := range f.Body().Blocks() {
 			if block.Type() != "variable" {
@@ -125,16 +124,15 @@ func (e *Expander) collectVariables() error {
 				continue
 			}
 			name := labels[0]
-			if existing, dup := seen[name]; dup {
+			if existing, dup := e.varsDef[name]; dup {
 				return fmt.Errorf("duplicate variable %q (defined in %s and %s)", name, existing, path)
 			}
-			seen[name] = path
+			e.varsDef[name] = path
 			def := block.Body().GetAttribute("default")
 			if def == nil {
 				continue
 			}
 			e.varsRaw[name] = def.Expr().BuildTokens(nil)
-			e.varsDef[name] = path
 		}
 	}
 	return nil
