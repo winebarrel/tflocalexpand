@@ -200,10 +200,10 @@ func rewriteBody(body *hclwrite.Body, locals map[string]hclwrite.Tokens, verbose
 }
 
 // filteredResolved returns the resolved-locals map narrowed by Only/Except.
-// Names absent from the returned map are left as `local.<name>` references by
-// `replaceLocalRefs`. Chain resolution in `resolveLocals` still uses the full
-// `e.resolved`, so expanded values are complete even when their dependencies
-// are themselves excluded from the user-facing rewrite.
+// Names absent from the returned map stay as `local.<name>` references after
+// rewriting. Chain resolution in resolveLocals uses the unfiltered map, so
+// expanded values are complete even when dependencies are excluded from the
+// user-facing rewrite.
 func (e *Expander) filteredResolved() map[string]hclwrite.Tokens {
 	if len(e.Only) == 0 && len(e.Except) == 0 {
 		return e.resolved
@@ -233,8 +233,8 @@ func (e *Expander) filteredResolved() map[string]hclwrite.Tokens {
 	return out
 }
 
-// pruneUnusedLocals removes local definitions whose `local.<name>` is no
-// longer referenced anywhere after expansion, and drops empty `locals` blocks.
+// pruneUnusedLocals removes local definitions whose `local.<name>` is not
+// referenced anywhere after expansion, and drops empty `locals` blocks.
 func (e *Expander) pruneUnusedLocals(changedFiles map[string]bool) {
 	used := map[string]bool{}
 	for _, f := range e.files {
@@ -316,7 +316,7 @@ func collectLocalRefs(tokens hclwrite.Tokens) []string {
 }
 
 // isLocalRefStart reports whether tokens[i:i+3] is `local.<ident>` and is not
-// preceded by `.` (which would make it part of a longer attribute access).
+// preceded by `.` (which would make it part of an outer attribute access).
 func isLocalRefStart(tokens hclwrite.Tokens, i int) bool {
 	if i+2 >= len(tokens) {
 		return false
@@ -340,8 +340,8 @@ func isLocalRefStart(tokens hclwrite.Tokens, i int) bool {
 // replaceLocalRefs returns a new token slice with `local.X` references
 // replaced by the resolved tokens, parenthesized when needed. When eval is
 // true and a substituted local is followed by a chain of `.attr` / `[idx]`
-// accessors that can be fully evaluated in an empty context, the entire chain
-// is folded to a literal.
+// accessors that can be evaluated in an empty context, the chain is folded
+// to a literal.
 func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, verbose, eval bool) hclwrite.Tokens {
 	in = cloneTokens(in)
 	out := make(hclwrite.Tokens, 0, len(in))
@@ -396,16 +396,16 @@ func replaceLocalRefs(in hclwrite.Tokens, locals map[string]hclwrite.Tokens, ver
 	if eval {
 		out = foldStaticExprs(out, verbose)
 		// Folding inside a template (e.g. `${true ? "b" : "c"}` or
-		// `${100 > 0}`) can produce new `${"..."}` / adjacent QuotedLit
-		// sequences that the earlier flatten/merge pass didn't see.
+		// `${100 > 0}`) can produce new `${"..."}` or adjacent QuotedLit
+		// sequences that the earlier flatten/merge pass did not see.
 		out = mergeQuotedLits(flattenStringTemplates(out))
 	}
 	return out
 }
 
-// accessChainExtent returns the end index (exclusive) of the chain of
-// `.<ident>` and `[...]` accessors starting at `start`. Returns `start` if
-// no chain is present.
+// accessChainExtent returns the exclusive end index of the chain of
+// `.<ident>` and `[...]` accessors starting at `start`, or `start` if no
+// chain is present.
 func accessChainExtent(in hclwrite.Tokens, start int) int {
 	i := start
 	for i < len(in) {
@@ -437,10 +437,10 @@ func accessChainExtent(in hclwrite.Tokens, start int) int {
 }
 
 // tryFoldAccess builds `(<base>)<chain>` as source, parses it as an HCL
-// expression, evaluates it with a nil context (constants only — no variables
-// or functions permitted), and returns the resulting value's literal tokens.
-// Returns (nil, false) if parsing fails, evaluation fails, or the result
-// contains unknown values.
+// expression, evaluates it with a nil context (constants only; no variables
+// or functions), and returns the resulting value's literal tokens. Returns
+// (nil, false) if parsing fails, evaluation fails, or the result is not
+// wholly known.
 func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
 	var buf bytes.Buffer
 	buf.WriteByte('(')
@@ -459,16 +459,15 @@ func tryFoldAccess(base, chain hclwrite.Tokens) (hclwrite.Tokens, bool) {
 }
 
 // foldStaticExprs re-parses the given tokens as an HCL expression and folds:
-//   - ConditionalExpr whose condition evaluates to a known boolean (replaced by
-//     the chosen branch's source verbatim — the other branch may still
-//     reference unknowns).
-//   - BinaryOpExpr / UnaryOpExpr whose result evaluates to a known boolean
-//     (replaced by `true` / `false`). Comparison and logical operators are the
-//     practical match; arithmetic stays as-is because its result isn't bool.
+//   - ConditionalExpr whose condition evaluates to a known boolean. The chosen
+//     branch's source is copied verbatim; the other branch may still reference
+//     unknowns.
+//   - BinaryOpExpr or UnaryOpExpr whose result evaluates to a known boolean,
+//     replaced by `true` or `false`. Comparison and logical operators are the
+//     practical match; arithmetic stays as-is because its result is not bool.
 //
-// Loops until no more folds are possible. Non-foldable expressions — including
-// those still referencing `var.X`, functions, or unresolved `local.X` — are
-// left untouched.
+// Loops until no more folds are possible. Expressions that still reference
+// `var.X`, functions, or unresolved `local.X` are left untouched.
 func foldStaticExprs(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
 	if len(in) == 0 || !hasFoldableToken(in) {
 		return in
@@ -499,10 +498,10 @@ func foldStaticExprs(in hclwrite.Tokens, verbose bool) hclwrite.Tokens {
 	return out
 }
 
-// hasFoldableToken reports whether the token slice contains any operator token
-// that could anchor a foldable expression (ternary `?`, comparison, logical
-// AND/OR, or unary `!`). Used as a cheap pre-check to skip the parse/walk work
-// when there is nothing to fold.
+// hasFoldableToken reports whether the token slice contains any operator that
+// could anchor a foldable expression (ternary `?`, comparison, logical AND/OR,
+// or unary `!`). Used as a pre-check to skip the parse/walk work when there
+// is nothing to fold.
 func hasFoldableToken(in hclwrite.Tokens) bool {
 	for _, t := range in {
 		switch t.Type {
@@ -522,8 +521,8 @@ func hasFoldableToken(in hclwrite.Tokens) bool {
 	return false
 }
 
-// foldOneExpr finds the first foldable expression in DFS order and rewrites
-// its source range. Returns the original src unchanged when none is found.
+// foldOneExpr finds the first foldable expression and rewrites its source
+// range. Returns the original src unchanged when none is found.
 func foldOneExpr(src []byte) ([]byte, bool) {
 	expr, diags := hclsyntax.ParseExpression(src, "", hcl.Pos{Line: 1, Column: 1})
 	if diags.HasErrors() {
@@ -551,7 +550,7 @@ func foldOneExpr(src []byte) ([]byte, bool) {
 
 // foldFinder walks an HCL AST and captures the first foldable expression.
 // For ConditionalExpr, `chosen` is the branch whose source is copied verbatim.
-// For BinaryOpExpr / UnaryOpExpr, `value` is the evaluated bool to emit.
+// For BinaryOpExpr and UnaryOpExpr, `value` is the evaluated bool to emit.
 type foldFinder struct {
 	target hclsyntax.Expression
 	chosen hclsyntax.Expression
@@ -594,9 +593,9 @@ func (f *foldFinder) Enter(n hclsyntax.Node) hcl.Diagnostics {
 
 func (f *foldFinder) Exit(hclsyntax.Node) hcl.Diagnostics { return nil }
 
-// tokensFromExprSource re-tokenizes an expression source by parsing it as a
-// trivial attribute and lifting its expression tokens. Returns (nil, false) if
-// the source does not round-trip as a valid HCL expression.
+// tokensFromExprSource re-tokenizes an expression source by parsing it as an
+// attribute value and lifting its expression tokens. Returns (nil, false) if
+// the source is not a valid HCL expression.
 func tokensFromExprSource(src []byte) (hclwrite.Tokens, bool) {
 	wrapped := append([]byte("x = "), src...)
 	f, diags := hclwrite.ParseConfig(wrapped, "", hcl.Pos{Line: 1, Column: 1})
@@ -610,9 +609,9 @@ func tokensFromExprSource(src []byte) (hclwrite.Tokens, bool) {
 	return attr.Expr().BuildTokens(nil), true
 }
 
-// flattenStringTemplates rewrites `${"..."}` sequences to inline their content,
-// so a substituted `"a${"xxx"}b"` collapses to `"axxxb"`. Only applies when the
-// inner expression is exactly a balanced quoted string template.
+// flattenStringTemplates rewrites `${"..."}` sequences to inline their
+// content, so a substituted `"a${"xxx"}b"` collapses to `"axxxb"`. Only
+// applies when the inner expression is a balanced quoted string template.
 func flattenStringTemplates(in hclwrite.Tokens) hclwrite.Tokens {
 	out := make(hclwrite.Tokens, 0, len(in))
 	i := 0
@@ -652,9 +651,9 @@ func flattenStringTemplates(in hclwrite.Tokens) hclwrite.Tokens {
 	return out
 }
 
-// literalToQuotedLit converts a single primitive literal token (number / true /
-// false) into a QuotedLit so it can be inlined into a surrounding string
-// template. Returns (nil, false) if the inner isn't such a literal.
+// literalToQuotedLit converts a single primitive literal token (number, true,
+// or false) into a QuotedLit so it can be inlined into a surrounding string
+// template. Returns (nil, false) if the inner is not such a literal.
 func literalToQuotedLit(inner hclwrite.Tokens) (*hclwrite.Token, bool) {
 	if len(inner) != 1 {
 		return nil, false
@@ -737,8 +736,8 @@ func wrapParens(t hclwrite.Tokens) hclwrite.Tokens {
 	return out
 }
 
-// needsParens reports whether `t` must be parenthesized when substituted into a
-// larger expression to preserve precedence.
+// needsParens reports whether `t` must be parenthesized when substituted into
+// a larger expression to preserve precedence.
 func needsParens(t hclwrite.Tokens) bool {
 	if len(t) == 0 {
 		return false
@@ -765,8 +764,8 @@ func needsParens(t hclwrite.Tokens) bool {
 	return true
 }
 
-// groupBalanced reports whether the opener at index 0 closes exactly at the
-// last index (i.e., the entire slice is one balanced group).
+// groupBalanced reports whether the opener at index 0 closes at the last
+// index, i.e. the whole slice is one balanced group.
 func groupBalanced(t hclwrite.Tokens, opener, closer hclsyntax.TokenType) bool {
 	depth := 0
 	for i, tok := range t {
