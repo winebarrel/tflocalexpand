@@ -108,12 +108,13 @@ func (e *Expander) collectLocals() error {
 }
 
 // collectVariables records the default expression of each `variable "<name>"`
-// block. Variables without a `default` are skipped and stay as `var.<name>`
-// references. No-op when Vars is false.
+// block. Variables without a `default` are tracked for duplicate detection
+// but stay as `var.<name>` references. No-op when Vars is false.
 func (e *Expander) collectVariables() error {
 	if !e.Vars {
 		return nil
 	}
+	seen := map[string]string{}
 	for path, f := range e.files {
 		for _, block := range f.Body().Blocks() {
 			if block.Type() != "variable" {
@@ -124,12 +125,13 @@ func (e *Expander) collectVariables() error {
 				continue
 			}
 			name := labels[0]
+			if existing, dup := seen[name]; dup {
+				return fmt.Errorf("duplicate variable %q (defined in %s and %s)", name, existing, path)
+			}
+			seen[name] = path
 			def := block.Body().GetAttribute("default")
 			if def == nil {
 				continue
-			}
-			if existing, dup := e.varsDef[name]; dup {
-				return fmt.Errorf("duplicate variable %q (defined in %s and %s)", name, existing, path)
 			}
 			e.varsRaw[name] = def.Expr().BuildTokens(nil)
 			e.varsDef[name] = path
@@ -342,6 +344,9 @@ func collectAllRefs(body *hclwrite.Body, usedLocals, usedVars map[string]bool) {
 		}
 	}
 	for _, blk := range body.Blocks() {
+		if blk.Type() == "variable" {
+			continue
+		}
 		collectAllRefs(blk.Body(), usedLocals, usedVars)
 	}
 }

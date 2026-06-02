@@ -93,6 +93,23 @@ func TestExpand_DuplicateVariable(t *testing.T) {
 	assert.Contains(t, err.Error(), "duplicate variable")
 }
 
+func TestExpand_DuplicateVariableWithoutDefault(t *testing.T) {
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "a.tf"), []byte(`variable "dup" {
+  type = string
+}
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "b.tf"), []byte(`variable "dup" {
+  default = "x"
+}
+`), 0o644))
+	e := NewExpander(tmp)
+	e.Vars = true
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate variable")
+}
+
 func TestExpand_OnlyBareName(t *testing.T) {
 	tmp := copyInputToTemp(t, "testdata/basic/input")
 	e := NewExpander(tmp)
@@ -129,6 +146,23 @@ func TestCollectVariables_SkipsBlocksWithUnexpectedLabels(t *testing.T) {
 	e.files["test.tf"] = f
 	require.NoError(t, e.collectVariables())
 	assert.Empty(t, e.varsRaw)
+}
+
+func TestCollectAllRefs_SkipsVariableBlocks(t *testing.T) {
+	src := []byte(`variable "a" {
+  default = var.b
+}
+resource "foo" "bar" {
+  name = local.x
+}
+`)
+	f, diags := hclwrite.ParseConfig(src, "test.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+	usedLocals := map[string]bool{}
+	usedVars := map[string]bool{}
+	collectAllRefs(f.Body(), usedLocals, usedVars)
+	assert.True(t, usedLocals["x"])
+	assert.False(t, usedVars["b"], "var.b inside a variable block should not count as used")
 }
 
 func TestRemoveUnusedFromBody_VariableBlockWithUnexpectedLabels(t *testing.T) {
