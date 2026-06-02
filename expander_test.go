@@ -109,7 +109,7 @@ func TestExpand_GlobError(t *testing.T) {
 
 func TestExpand_LoadReadError(t *testing.T) {
 	tmp := t.TempDir()
-	// A directory named "trap.tf" makes os.ReadFile fail when load() iterates it.
+	// A directory named "trap.tf" makes os.ReadFile fail in load().
 	require.NoError(t, os.Mkdir(filepath.Join(tmp, "trap.tf"), 0o755))
 	e := NewExpander(tmp)
 	err := e.Expand(true)
@@ -156,7 +156,7 @@ func TestNeedsParens_Cases(t *testing.T) {
 	singleIdent := hclwrite.Tokens{{Type: hclsyntax.TokenIdent, Bytes: []byte("x")}}
 	assert.False(t, needsParens(singleIdent))
 
-	// `(a)b` is wrapped but inner closes before the end → still needs parens
+	// `(a)b` is wrapped but the inner group closes before the end, so it still needs parens.
 	notBalanced := hclwrite.Tokens{
 		{Type: hclsyntax.TokenOParen, Bytes: []byte("(")},
 		{Type: hclsyntax.TokenIdent, Bytes: []byte("a")},
@@ -254,7 +254,7 @@ func TestLiteralToQuotedLit_NonMatching(t *testing.T) {
 }
 
 func TestAccessChainExtent_NestedBrackets(t *testing.T) {
-	// Tokens for `[[0,1][0]]` — exercise the nested-bracket depth++ path.
+	// Tokens for `[[0,1][0]]`, exercising the nested-bracket depth++ path.
 	toks := hclwrite.Tokens{
 		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
 		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
@@ -271,7 +271,7 @@ func TestAccessChainExtent_NestedBrackets(t *testing.T) {
 }
 
 func TestAccessChainExtent_UnbalancedBreaks(t *testing.T) {
-	// `[ 0` with no closing bracket — should stop at the unclosed `[`.
+	// `[ 0` with no closing bracket should stop at the unclosed `[`.
 	toks := hclwrite.Tokens{
 		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
 		{Type: hclsyntax.TokenNumberLit, Bytes: []byte("0")},
@@ -284,7 +284,7 @@ func TestFoldStaticExprs_Empty(t *testing.T) {
 }
 
 func TestFoldOneExpr_ParseFailure(t *testing.T) {
-	// `?` alone is not a valid expression — parse fails, no fold.
+	// `?` alone is not a valid expression, so parse fails and no fold happens.
 	src := []byte("?")
 	out, ok := foldOneExpr(src)
 	assert.False(t, ok)
