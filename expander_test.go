@@ -146,6 +146,15 @@ func TestExpand_OnlyEmptySuffix(t *testing.T) {
 	assert.Contains(t, err.Error(), "no name after the prefix")
 }
 
+func TestExpand_OnlyDottedSuffix(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	e := NewExpander(tmp)
+	e.Only = []string{"local.foo.bar"}
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "single identifier")
+}
+
 func TestExpand_OnlyTrimsWhitespace(t *testing.T) {
 	tmp := copyInputToTemp(t, "testdata/only/input")
 	e := NewExpander(tmp)

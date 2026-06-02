@@ -272,8 +272,9 @@ func (e *Expander) filteredResolved() (map[string]hclwrite.Tokens, map[string]hc
 }
 
 // splitPrefixedNames parses `local.X` / `var.X` names into separate sets.
-// Surrounding whitespace is trimmed. Bare names (no prefix) and prefixed
-// names with an empty suffix return an error.
+// Surrounding whitespace is trimmed. Bare names (no prefix), names with an
+// empty suffix, and suffixes containing `.` (e.g. `local.a.b`) all return
+// an error.
 func splitPrefixedNames(names []string) (locals, vars map[string]bool, err error) {
 	locals = map[string]bool{}
 	vars = map[string]bool{}
@@ -293,6 +294,9 @@ func splitPrefixedNames(names []string) (locals, vars map[string]bool, err error
 		}
 		if suffix == "" {
 			return nil, nil, fmt.Errorf("%q has no name after the prefix", n)
+		}
+		if strings.Contains(suffix, ".") {
+			return nil, nil, fmt.Errorf("%q: name must be a single identifier", n)
 		}
 		dst[suffix] = true
 	}
