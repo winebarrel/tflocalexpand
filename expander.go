@@ -274,19 +274,29 @@ func (e *Expander) filteredResolved() (map[string]hclwrite.Tokens, map[string]hc
 }
 
 // splitPrefixedNames parses `local.X` / `var.X` names into separate sets.
-// Bare names (without prefix) return an error.
+// Surrounding whitespace is trimmed. Bare names (no prefix) and prefixed
+// names with an empty suffix return an error.
 func splitPrefixedNames(names []string) (locals, vars map[string]bool, err error) {
 	locals = map[string]bool{}
 	vars = map[string]bool{}
-	for _, n := range names {
+	for _, raw := range names {
+		n := strings.TrimSpace(raw)
+		var dst map[string]bool
+		var suffix string
 		switch {
 		case strings.HasPrefix(n, "local."):
-			locals[strings.TrimPrefix(n, "local.")] = true
+			dst = locals
+			suffix = strings.TrimPrefix(n, "local.")
 		case strings.HasPrefix(n, "var."):
-			vars[strings.TrimPrefix(n, "var.")] = true
+			dst = vars
+			suffix = strings.TrimPrefix(n, "var.")
 		default:
 			return nil, nil, fmt.Errorf("%q must be prefixed with \"local.\" or \"var.\"", n)
 		}
+		if suffix == "" {
+			return nil, nil, fmt.Errorf("%q has no name after the prefix", n)
+		}
+		dst[suffix] = true
 	}
 	return locals, vars, nil
 }

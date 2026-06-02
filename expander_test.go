@@ -137,6 +137,23 @@ func TestExpand_ExceptBareName(t *testing.T) {
 	assert.Contains(t, err.Error(), "--except")
 }
 
+func TestExpand_OnlyEmptySuffix(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/basic/input")
+	e := NewExpander(tmp)
+	e.Only = []string{"local."}
+	err := e.Expand(true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no name after the prefix")
+}
+
+func TestExpand_OnlyTrimsWhitespace(t *testing.T) {
+	tmp := copyInputToTemp(t, "testdata/only/input")
+	e := NewExpander(tmp)
+	e.Only = []string{" local.region", "local.name "}
+	require.NoError(t, e.Expand(true))
+	compareDir(t, tmp, "testdata/only/expected")
+}
+
 func TestCollectVariables_SkipsBlocksWithUnexpectedLabels(t *testing.T) {
 	f := hclwrite.NewEmptyFile()
 	f.Body().AppendNewBlock("variable", nil)
